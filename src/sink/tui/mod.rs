@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Cell, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
 use crate::filter::{Filter, FilterMode, FilterTarget};
@@ -75,6 +75,9 @@ pub(crate) struct App {
 
     /// Viewport height from the last render, used for page scroll calculations.
     viewport_height: usize,
+
+    /// Cursor position within the tree-select overlay (None = overlay closed).
+    tree_select_cursor: Option<usize>,
 }
 
 impl App {
@@ -91,6 +94,7 @@ impl App {
             should_quit: false,
             current_entry_count: 0,
             viewport_height: 0,
+            tree_select_cursor: None,
         }
     }
 
@@ -106,6 +110,10 @@ impl App {
         match event {
             Event::Key(key) => {
                 if key.kind != KeyEventKind::Press {
+                    return;
+                }
+                if self.tree_select_cursor.is_some() {
+                    self.handle_tree_select_key(key.code, key.modifiers);
                     return;
                 }
                 match self.toolbar_mode {
@@ -156,7 +164,7 @@ impl App {
             (KeyCode::Char('p'), _) => self.pop_and_remove_filter(),
             (KeyCode::Char('['), _) => self.navigate_sibling(-1),
             (KeyCode::Char(']'), _) => self.navigate_sibling(1),
-            (KeyCode::Tab, _) => self.navigate_child(),
+            (KeyCode::Tab, _) => self.enter_tree_select(),
             _ => {}
         }
     }
@@ -431,18 +439,93 @@ impl App {
         self.h_scroll = 0;
     }
 
-    fn navigate_child(&mut self) {
-        let Ok(arena) = self.arena.lock() else {
-            return;
-        };
+    // --- Tree select ---
 
-        let view = arena.view_at(&self.view_path);
-        if !view.children.is_empty() {
-            drop(arena);
-            self.view_path.push(0);
-            self.scroll = ScrollState::Tail;
-            self.h_scroll = 0;
-            self.update_from_arena();
+    fn enter_tree_select(&mut self) {
+        let Ok(arena) = self.arena.lock() else { return };
+        let mut flat: Vec<(ViewPath, String)> = Vec::new();
+        let mut path: ViewPath = Vec::new();
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+        let cursor = flat.iter().position(|(p, _)| *p == self.view_path).unwrap_or(0);
+        self.tree_select_cursor = Some(cursor);
+    }
+
+    fn handle_tree_select_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+        let cursor = match self.tree_select_cursor {
+            Some(c) => c,
+            None => return,
+        };
+        match code {
+            KeyCode::Esc => {
+                self.tree_select_cursor = None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.tree_select_cursor = Some(cursor.saturating_sub(1));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let Ok(arena) = self.arena.lock() else { return };
+                let mut flat: Vec<(ViewPath, String)> = Vec::new();
+                let mut path: ViewPath = Vec::new();
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+                self.tree_select_cursor =
+                    Some((cursor + 1).min(flat.len().saturating_sub(1)));
+            }
+            KeyCode::Enter | KeyCode::Tab => {
+                let Ok(arena) = self.arena.lock() else { return };
+                let mut flat: Vec<(ViewPath, String)> = Vec::new();
+                let mut path: ViewPath = Vec::new();
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+                if let Some((selected_path, _)) = flat.get(cursor) {
+                    self.view_path = selected_path.clone();
+                    self.scroll = ScrollState::Tail;
+                    self.h_scroll = 0;
+                    self.current_entry_count =
+                        arena.view_at(&self.view_path).entries.len();
+                }
+                self.tree_select_cursor = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Flatten the view tree into (path, display-line) pairs for the overlay.
+    /// `has_more[i]` = true means depth-i ancestor still has siblings after it.
+    fn flatten_view_tree(
+        view: &LogView,
+        path: &mut ViewPath,
+        depth: usize,
+        has_more: &[bool],
+        out: &mut Vec<(ViewPath, String)>,
+    ) {
+        let label = if depth == 0 {
+            format!("/ root  ({} entries)", view.entries.len())
+        } else {
+            let mut s = String::new();
+            for i in 0..depth - 1 {
+                s.push_str(if has_more[i] { "│   " } else { "    " });
+            }
+            s.push_str(if has_more[depth - 1] { "├── " } else { "└── " });
+            let pat = view
+                .filters
+                .first()
+                .map(|f| match &f.mode {
+                    FilterMode::Substring(p) => format!("\"{}\"", p),
+                    FilterMode::Regex(r) => format!("/{}/", r.as_str()),
+                })
+                .unwrap_or_else(|| "(unfiltered)".to_string());
+            s.push_str(&pat);
+            s.push_str(&format!("  ({} entries)", view.entries.len()));
+            s
+        };
+        out.push((path.clone(), label));
+
+        let n = view.children.len();
+        for (i, child) in view.children.iter().enumerate() {
+            path.push(i);
+            let mut next_has_more = has_more.to_vec();
+            next_has_more.push(i < n - 1);
+            Self::flatten_view_tree(child, path, depth + 1, &next_has_more, out);
+            path.pop();
         }
     }
 
@@ -465,6 +548,10 @@ impl App {
         self.viewport_height = chunks[0].height as usize;
         self.render_log_list(frame, chunks[0], &arena, view);
         self.render_toolbar(frame, chunks[1], &arena, view);
+
+        if self.tree_select_cursor.is_some() {
+            self.render_tree_select_overlay(frame, frame.area(), &arena);
+        }
     }
 
     fn render_log_list(
@@ -586,6 +673,68 @@ impl App {
             }
         }
     }
+
+    fn render_tree_select_overlay(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+    ) {
+        let cursor = match self.tree_select_cursor {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mut flat: Vec<(ViewPath, String)> = Vec::new();
+        let mut path: ViewPath = Vec::new();
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+
+        let popup_area = centered_rect(72, 65, area);
+        frame.render_widget(Clear, popup_area);
+
+        let items: Vec<ListItem> = flat
+            .iter()
+            .map(|(p, label)| {
+                let style = if *p == self.view_path {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(label.as_str()).style(style)
+            })
+            .collect();
+
+        let cursor = cursor.min(flat.len().saturating_sub(1));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Views ")
+                    .title_bottom(" ↑↓ / j k : navigate   Enter / Tab : go   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol("> ");
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(cursor));
+        frame.render_stateful_widget(list, popup_area, &mut list_state);
+    }
+}
+
+/// Return a centered `Rect` carved out of `area`.
+fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
 }
 
 /// Run the TUI event loop. This takes ownership of stdout for rendering.
