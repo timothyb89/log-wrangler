@@ -13,7 +13,7 @@ use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 
@@ -32,6 +32,15 @@ enum ToolbarMode {
 enum FilterEntryMode {
     Substring,
     Regex,
+}
+
+/// Display mode for log content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DisplayMode {
+    /// Show raw message text as-is.
+    Raw,
+    /// Parse nested JSON and show level/message/labels columns.
+    Pretty,
 }
 
 /// Scroll state for the main log list.
@@ -78,6 +87,16 @@ pub(crate) struct App {
 
     /// Cursor position within the tree-select overlay (None = overlay closed).
     tree_select_cursor: Option<usize>,
+
+    /// Current display mode (raw vs pretty).
+    display_mode: DisplayMode,
+
+    /// Map from screen row offset (relative to log list body top) to view
+    /// entry index. Populated each render frame; used by mouse click handler.
+    visible_row_map: Vec<usize>,
+
+    /// The absolute Y coordinate where the log list body starts (after header).
+    log_list_body_y: u16,
 }
 
 impl App {
@@ -95,6 +114,7 @@ impl App {
             current_entry_count: 0,
             viewport_height: 0,
             tree_select_cursor: None,
+            display_mode: DisplayMode::Pretty,
         }
     }
 
@@ -165,6 +185,12 @@ impl App {
             (KeyCode::Char('['), _) => self.navigate_sibling(-1),
             (KeyCode::Char(']'), _) => self.navigate_sibling(1),
             (KeyCode::Tab, _) => self.enter_tree_select(),
+            (KeyCode::Char('v'), _) => {
+                self.display_mode = match self.display_mode {
+                    DisplayMode::Raw => DisplayMode::Pretty,
+                    DisplayMode::Pretty => DisplayMode::Raw,
+                };
+            }
             _ => {}
         }
     }
@@ -561,6 +587,19 @@ impl App {
         arena: &Arena,
         view: &LogView,
     ) {
+        match self.display_mode {
+            DisplayMode::Raw => self.render_log_list_raw(frame, area, arena, view),
+            DisplayMode::Pretty => self.render_log_list_pretty(frame, area, arena, view),
+        }
+    }
+
+    fn render_log_list_raw(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
         let visible_height = area.height as usize;
         let entries = &view.entries;
         let total = entries.len();
@@ -572,7 +611,6 @@ impl App {
             return;
         }
 
-        // Determine visible window and selected offset within it.
         let (start_idx, selected_view_idx) = match &self.scroll {
             ScrollState::Tail => {
                 let start = total.saturating_sub(visible_height);
@@ -597,10 +635,8 @@ impl App {
 
                 let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
 
-                // Apply horizontal scroll to the selected row's message.
                 let message = if Some(view_idx) == selected_view_idx {
-                    let chars: String = resolved.message.chars().skip(self.h_scroll).collect();
-                    chars
+                    resolved.message.chars().skip(self.h_scroll).collect()
                 } else {
                     resolved.message.to_string()
                 };
@@ -626,6 +662,187 @@ impl App {
         frame.render_stateful_widget(table, area, &mut table_state);
     }
 
+    fn render_log_list_pretty(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
+        let visible_height = area.height as usize;
+        let entries = &view.entries;
+        let total = entries.len();
+
+        if total == 0 {
+            let empty = Paragraph::new("No log entries")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        let selected_view_idx = match &self.scroll {
+            ScrollState::Tail => None,
+            ScrollState::Selected(sel) => Some((*sel).min(total.saturating_sub(1))),
+        };
+
+        // Compute start_idx. For Tail mode, work backward accounting for row
+        // heights (non-selected entries may still be multi-line from newlines).
+        // For Selected mode, use a centering heuristic then clamp.
+        let start_idx = match &self.scroll {
+            ScrollState::Tail => {
+                let mut acc = 0usize;
+                let mut start = total;
+                while start > 0 {
+                    let h = pretty_row_height(arena, entries[start - 1], false);
+                    if acc + h > visible_height {
+                        break;
+                    }
+                    acc += h;
+                    start -= 1;
+                }
+                start
+            }
+            ScrollState::Selected(sel) => {
+                let sel = (*sel).min(total.saturating_sub(1));
+                let half = visible_height / 2;
+                sel.saturating_sub(half).min(total.saturating_sub(1))
+            }
+        };
+
+        // Build rows from start_idx, accumulating heights until viewport full.
+        let mut rows: Vec<Row> = Vec::new();
+        let mut accumulated = 0usize;
+        let mut table_select_idx: Option<usize> = None;
+
+        for view_idx in start_idx..total {
+            if accumulated >= visible_height {
+                break;
+            }
+
+            let arena_idx = entries[view_idx];
+            let resolved = arena.resolve_entry(arena_idx);
+            let is_selected = Some(view_idx) == selected_view_idx;
+
+            let display_msg = resolved.inner_message.unwrap_or(resolved.message);
+            let msg_lines: Vec<&str> = display_msg.lines().collect();
+            let msg_line_count = msg_lines.len().max(1);
+
+            // Merge logcli labels + structured fields for display.
+            let all_labels: Vec<(&str, &str)> = resolved
+                .labels
+                .iter()
+                .chain(resolved.structured_fields.iter())
+                .copied()
+                .collect();
+
+            let label_lines = if is_selected { all_labels.len() } else { 0 };
+            let row_height = msg_line_count + label_lines;
+
+            // Indicator column: mark multi-line entries.
+            let indicator = if row_height > 1 {
+                let lines: Vec<Line> = (0..row_height).map(|_| Line::from("│")).collect();
+                Cell::from(Text::from(lines))
+            } else {
+                Cell::from(" ")
+            };
+
+            // Timestamp.
+            let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
+
+            // Level with semantic color.
+            let level_cell = if let Some(lvl) = resolved.level {
+                Cell::from(Span::styled(level_display(lvl), level_style(lvl)))
+            } else {
+                Cell::from("")
+            };
+
+            // Content column.
+            let content = if is_selected {
+                // Expanded: message lines + one line per label.
+                let mut lines: Vec<Line> = msg_lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        if i == 0 {
+                            let chars: String = l.chars().skip(self.h_scroll).collect();
+                            Line::from(chars)
+                        } else {
+                            Line::from(l.to_string())
+                        }
+                    })
+                    .collect();
+                for (k, v) in &all_labels {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}: {}", k, v),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                Cell::from(Text::from(lines))
+            } else if msg_line_count > 1 {
+                // Multi-line message (not selected): show all lines, abridged labels on first.
+                let mut lines: Vec<Line> = Vec::with_capacity(msg_line_count);
+                for (i, l) in msg_lines.iter().enumerate() {
+                    if i == 0 && !all_labels.is_empty() {
+                        let mut label_suffix = String::new();
+                        for (k, v) in &all_labels {
+                            label_suffix.push_str(&format!("  {}={}", k, v));
+                        }
+                        lines.push(Line::from(vec![
+                            Span::raw(l.to_string()),
+                            Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
+                        ]));
+                    } else {
+                        lines.push(Line::from(l.to_string()));
+                    }
+                }
+                Cell::from(Text::from(lines))
+            } else {
+                // Single-line: message + inline abridged labels.
+                if all_labels.is_empty() {
+                    Cell::from(display_msg)
+                } else {
+                    let mut label_suffix = String::new();
+                    for (k, v) in &all_labels {
+                        label_suffix.push_str(&format!("  {}={}", k, v));
+                    }
+                    Cell::from(Line::from(vec![
+                        Span::raw(display_msg.to_string()),
+                        Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
+                    ]))
+                }
+            };
+
+            if is_selected {
+                table_select_idx = Some(rows.len());
+            }
+
+            rows.push(
+                Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
+                    .height(row_height as u16),
+            );
+            accumulated += row_height;
+        }
+
+        let widths = [
+            Constraint::Length(1),  // indicator
+            Constraint::Length(15), // time
+            Constraint::Length(5),  // level
+            Constraint::Min(1),    // content
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec![" ", "Time", "Level", "Message"])
+                    .style(Style::default().bold().fg(Color::Cyan)),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+
+        let mut table_state = TableState::default();
+        table_state.select(table_select_idx);
+
+        frame.render_stateful_widget(table, area, &mut table_state);
+    }
+
     fn render_toolbar(
         &self,
         frame: &mut Frame,
@@ -643,9 +860,14 @@ impl App {
                     ScrollState::Selected(_) => "SCROLL",
                 };
 
+                let display_label = match self.display_mode {
+                    DisplayMode::Raw => "RAW",
+                    DisplayMode::Pretty => "PRETTY",
+                };
+
                 let status = format!(
-                    " {} | Filters: {} | View: {}/{} entries | q:quit /:filter",
-                    mode_indicator, filter_depth, entry_count, total_count,
+                    " {} | {} | Filters: {} | View: {}/{} entries | q:quit /:filter v:view",
+                    mode_indicator, display_label, filter_depth, entry_count, total_count,
                 );
 
                 let paragraph = Paragraph::new(Line::from(status))
@@ -719,6 +941,41 @@ impl App {
         list_state.select(Some(cursor));
         frame.render_stateful_widget(list, popup_area, &mut list_state);
     }
+}
+
+/// Compute the row height for an entry in pretty mode.
+fn pretty_row_height(arena: &Arena, arena_idx: usize, is_selected: bool) -> usize {
+    let resolved = arena.resolve_entry(arena_idx);
+    let msg = resolved.inner_message.unwrap_or(resolved.message);
+    let msg_lines = msg.lines().count().max(1);
+    let label_lines = if is_selected {
+        resolved.labels.len() + resolved.structured_fields.len()
+    } else {
+        0
+    };
+    msg_lines + label_lines
+}
+
+fn level_style(level: &str) -> Style {
+    match level.to_ascii_lowercase().as_str() {
+        "trace" => Style::default().fg(Color::DarkGray),
+        "debug" => Style::default().fg(Color::Cyan),
+        "info" => Style::default().fg(Color::Green),
+        "warn" | "warning" => Style::default().fg(Color::Yellow),
+        "error" | "err" => Style::default().fg(Color::Red),
+        "fatal" | "panic" | "critical" | "dpanic" => Style::default().fg(Color::Red).bold(),
+        _ => Style::default(),
+    }
+}
+
+fn level_display(level: &str) -> String {
+    let upper = level.to_ascii_uppercase();
+    let display = match upper.as_str() {
+        "WARNING" => "WARN",
+        other if other.len() > 5 => &other[..5],
+        other => other,
+    };
+    format!("{:<5}", display)
 }
 
 /// Return a centered `Rect` carved out of `area`.
