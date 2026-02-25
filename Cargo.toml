@@ -1,0 +1,16 @@
+[package]
+name = "log-wrangler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = "0.4.44"
+clap = { version = "4.5.60", features = ["derive"] }
+color-eyre = "0.6.5"
+jiff = "0.2.21"
+lasso = { version = "0.7.3", features = ["multi-threaded"] }
+ratatui = "0.30.0"
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.44"
+tracing-error = "0.2.1"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
