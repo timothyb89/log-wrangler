@@ -72,7 +72,7 @@ impl Arena {
         }))
     }
 
-    pub fn resolve_entry(idx: usize) ->
+    //pub fn resolve_entry(idx: usize) ->
 }
 
 struct LogView {
@@ -85,7 +85,18 @@ struct LogView {
 
 impl LogView {
     pub fn ingest(&mut self, arena: &Arena, entry: &LogEntry, idx: usize) {
+        // TODO: apply filters;
 
+        for filter in &self.filters {
+            // TODO: if filter is false, return
+        }
+
+        // Filters match, append this entry and pass to child views.
+        self.entries.push(idx);
+
+        for child in &mut self.children {
+            child.ingest(arena, entry, idx);
+        }
     }
 }
 
