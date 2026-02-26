@@ -76,6 +76,9 @@ pub(crate) struct App {
     /// Cursor position within filter_input.
     filter_cursor: usize,
 
+    /// Whether the filter being entered is inverted (excludes matches).
+    filter_inverted: bool,
+
     /// Whether the app should exit.
     should_quit: bool,
 
@@ -110,6 +113,7 @@ impl App {
             filter_entry_mode: FilterEntryMode::Substring,
             filter_input: String::new(),
             filter_cursor: 0,
+            filter_inverted: false,
             should_quit: false,
             current_entry_count: 0,
             viewport_height: 0,
@@ -193,6 +197,7 @@ impl App {
                 self.toolbar_mode = ToolbarMode::FilterEntry;
                 self.filter_input.clear();
                 self.filter_cursor = 0;
+                self.filter_inverted = false;
             }
             (KeyCode::Backspace, _) => self.pop_filter(),
             (KeyCode::Char('p'), _) => self.pop_and_remove_filter(),
@@ -215,6 +220,7 @@ impl App {
                 self.toolbar_mode = ToolbarMode::Normal;
                 self.filter_input.clear();
                 self.filter_cursor = 0;
+                self.filter_inverted = false;
             }
             (KeyCode::Enter, _) => {
                 self.apply_filter();
@@ -224,6 +230,9 @@ impl App {
                     FilterEntryMode::Substring => FilterEntryMode::Regex,
                     FilterEntryMode::Regex => FilterEntryMode::Substring,
                 };
+            }
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                self.filter_inverted = !self.filter_inverted;
             }
             (KeyCode::Backspace, _) => {
                 if self.filter_cursor > 0 {
@@ -339,7 +348,7 @@ impl App {
         let filter = Filter {
             mode,
             target: FilterTarget::Any,
-            inverted: false,
+            inverted: self.filter_inverted,
         };
 
         let Ok(mut arena) = self.arena.lock() else {
@@ -351,11 +360,13 @@ impl App {
         let mut child_entries = Vec::new();
         for &arena_idx in &parent.entries {
             let resolved = arena.resolve_entry(arena_idx);
-            let matches = filter.matches(resolved.message)
+            // Compute raw match across all fields, then apply inversion.
+            let raw = filter.raw_matches(resolved.message)
                 || resolved
                     .labels
                     .iter()
-                    .any(|(_, v)| filter.matches(v));
+                    .any(|(_, v)| filter.raw_matches(v));
+            let matches = if filter.inverted { !raw } else { raw };
             if matches {
                 child_entries.push(arena_idx);
             }
@@ -379,6 +390,7 @@ impl App {
 
         self.filter_input.clear();
         self.filter_cursor = 0;
+        self.filter_inverted = false;
         self.toolbar_mode = ToolbarMode::Normal;
     }
 
@@ -548,9 +560,12 @@ impl App {
             let pat = view
                 .filters
                 .first()
-                .map(|f| match &f.mode {
-                    FilterMode::Substring(p) => format!("\"{}\"", p),
-                    FilterMode::Regex(r) => format!("/{}/", r.as_str()),
+                .map(|f| {
+                    let prefix = if f.inverted { "!" } else { "" };
+                    match &f.mode {
+                        FilterMode::Substring(p) => format!("{}\"{}\"", prefix, p),
+                        FilterMode::Regex(r) => format!("{}/{}/", prefix, r.as_str()),
+                    }
                 })
                 .unwrap_or_else(|| "(unfiltered)".to_string());
             s.push_str(&pat);
@@ -909,15 +924,37 @@ impl App {
                     FilterEntryMode::Regex => "RGX",
                 };
 
-                let input_display =
-                    format!(" [{}] Filter: {}", mode_label, self.filter_input);
+                let base_style = Style::default().bg(Color::Yellow).fg(Color::Black);
 
-                let paragraph = Paragraph::new(Line::from(input_display))
-                    .style(Style::default().bg(Color::Yellow).fg(Color::Black));
+                let mut spans = vec![
+                    Span::styled(format!(" [{}]", mode_label), base_style),
+                ];
+
+                if self.filter_inverted {
+                    spans.push(Span::styled(
+                        " NOT",
+                        Style::default().bg(Color::Red).fg(Color::White).bold(),
+                    ));
+                }
+
+                let filter_text = format!(" Filter: {}", self.filter_input);
+                spans.push(Span::styled(filter_text, base_style));
+
+                // Fill remaining width with background color.
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
                 frame.render_widget(paragraph, area);
 
                 // Position cursor within the filter input.
-                let prefix_len = 4 + mode_label.len() + 10; // " [XXX] Filter: "
+                // prefix spans: " [MODE]" + optional " NOT" + " Filter: "
+                let prefix_len = 2 + mode_label.len() + 1
+                    + if self.filter_inverted { 4 } else { 0 }
+                    + 9;
                 let cursor_x =
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));

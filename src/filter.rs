@@ -28,16 +28,20 @@ pub(crate) struct Filter {
 }
 
 impl Filter {
-    /// Test whether a resolved string matches this filter.
-    pub fn matches(&self, text: &str) -> bool {
-        let raw_match = match &self.mode {
+    /// Test whether a resolved string matches this filter's pattern, ignoring
+    /// the `inverted` flag. Useful when callers need to compose raw matches
+    /// across multiple fields before applying inversion.
+    pub fn raw_matches(&self, text: &str) -> bool {
+        match &self.mode {
             FilterMode::Substring(pat) => text.contains(pat.as_str()),
             FilterMode::Regex(re) => re.is_match(text),
-        };
-        if self.inverted {
-            !raw_match
-        } else {
-            raw_match
         }
+    }
+
+    /// Test whether a resolved string matches this filter, respecting
+    /// the `inverted` flag. Suitable for single-field targets (Message, Label).
+    pub fn matches(&self, text: &str) -> bool {
+        let raw = self.raw_matches(text);
+        if self.inverted { !raw } else { raw }
     }
 }

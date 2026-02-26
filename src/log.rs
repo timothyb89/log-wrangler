@@ -194,15 +194,13 @@ impl LogView {
                 }
                 crate::filter::FilterTarget::Any => {
                     let msg = rodeo.messages.resolve(&entry.message);
-                    if filter.matches(msg) {
-                        true
-                    } else {
-                        (0..entry.labels_length).any(|i| {
+                    let raw = filter.raw_matches(msg)
+                        || (0..entry.labels_length).any(|i| {
                             let (_, v) = &labels[entry.labels_start + i];
                             let val = rodeo.label_values.resolve(v);
-                            filter.matches(val)
-                        })
-                    }
+                            filter.raw_matches(val)
+                        });
+                    if filter.inverted { !raw } else { raw }
                 }
                 crate::filter::FilterTarget::Label(key_spur) => {
                     (0..entry.labels_length).any(|i| {
