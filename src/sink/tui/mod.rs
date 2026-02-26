@@ -4,7 +4,7 @@ use std::time::Duration;
 use color_eyre::Result;
 use crossterm::event::{
     DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEventKind,
-    KeyModifiers, MouseEventKind,
+    KeyModifiers, MouseButton, MouseEventKind,
 };
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -115,6 +115,8 @@ impl App {
             viewport_height: 0,
             tree_select_cursor: None,
             display_mode: DisplayMode::Pretty,
+            visible_row_map: Vec::new(),
+            log_list_body_y: 0,
         }
     }
 
@@ -144,6 +146,18 @@ impl App {
             Event::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollDown => self.scroll_down(),
                 MouseEventKind::ScrollUp => self.scroll_up(),
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if self.tree_select_cursor.is_some() {
+                        return;
+                    }
+                    if mouse.row >= self.log_list_body_y {
+                        let offset = (mouse.row - self.log_list_body_y) as usize;
+                        if let Some(&view_idx) = self.visible_row_map.get(offset) {
+                            self.scroll = ScrollState::Selected(view_idx);
+                            self.h_scroll = 0;
+                        }
+                    }
+                }
                 _ => {}
             },
             _ => {}
@@ -558,7 +572,8 @@ impl App {
     // --- Rendering ---
 
     fn render(&mut self, frame: &mut Frame) {
-        let Ok(arena) = self.arena.lock() else {
+        let arena_ref = self.arena.clone();
+        let Ok(arena) = arena_ref.lock() else {
             return;
         };
 
@@ -581,7 +596,7 @@ impl App {
     }
 
     fn render_log_list(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: ratatui::layout::Rect,
         arena: &Arena,
@@ -594,7 +609,7 @@ impl App {
     }
 
     fn render_log_list_raw(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: ratatui::layout::Rect,
         arena: &Arena,
@@ -627,6 +642,13 @@ impl App {
         };
 
         let end_idx = (start_idx + visible_height).min(total);
+
+        // Populate row map for mouse click support (all rows height 1 in raw mode).
+        self.visible_row_map.clear();
+        self.log_list_body_y = area.y + 1; // +1 for header row
+        for view_idx in start_idx..end_idx {
+            self.visible_row_map.push(view_idx);
+        }
 
         let rows: Vec<Row> = (start_idx..end_idx)
             .map(|view_idx| {
@@ -663,7 +685,7 @@ impl App {
     }
 
     fn render_log_list_pretty(
-        &self,
+        &mut self,
         frame: &mut Frame,
         area: ratatui::layout::Rect,
         arena: &Arena,
@@ -710,6 +732,8 @@ impl App {
         };
 
         // Build rows from start_idx, accumulating heights until viewport full.
+        self.visible_row_map.clear();
+        self.log_list_body_y = area.y + 1; // +1 for header row
         let mut rows: Vec<Row> = Vec::new();
         let mut accumulated = 0usize;
         let mut table_select_idx: Option<usize> = None;
@@ -814,6 +838,11 @@ impl App {
 
             if is_selected {
                 table_select_idx = Some(rows.len());
+            }
+
+            // Extend row map: each screen row within this entry maps to view_idx.
+            for _ in 0..row_height {
+                self.visible_row_map.push(view_idx);
             }
 
             rows.push(
