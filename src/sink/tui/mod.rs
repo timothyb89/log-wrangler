@@ -19,6 +19,7 @@ use ratatui::Frame;
 
 use crate::filter::{Filter, FilterMode, FilterTarget};
 use crate::log::{Arena, LogView, ViewPath};
+use crate::source::loki::LokiSourceParams;
 
 /// The mode the bottom toolbar is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +27,7 @@ enum ToolbarMode {
     Normal,
     FilterEntry,
     SearchEntry,
+    QueryEntry,
 }
 
 /// Direction for search navigation.
@@ -111,10 +113,26 @@ pub(crate) struct App {
 
     /// The absolute Y coordinate where the log list body starts (after header).
     log_list_body_y: u16,
+
+    /// Current LogQL query string (for Loki sources).
+    loki_query: String,
+
+    /// Text buffer for query editing input.
+    query_input: String,
+
+    /// Cursor position within query_input.
+    query_cursor: usize,
+
+    /// Watch channel sender to signal Loki source restart. None for stdin.
+    source_restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
 }
 
 impl App {
-    fn new(arena: Arc<Mutex<Arena>>) -> Self {
+    fn new(
+        arena: Arc<Mutex<Arena>>,
+        source_restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
+        initial_query: Option<String>,
+    ) -> Self {
         Self {
             arena,
             view_path: Vec::new(),
@@ -133,6 +151,10 @@ impl App {
             search: None,
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
+            loki_query: initial_query.unwrap_or_default(),
+            query_input: String::new(),
+            query_cursor: 0,
+            source_restart_tx,
         }
     }
 
@@ -158,6 +180,7 @@ impl App {
                     ToolbarMode::Normal => self.handle_normal_key(key.code, key.modifiers),
                     ToolbarMode::FilterEntry => self.handle_filter_key(key.code, key.modifiers),
                     ToolbarMode::SearchEntry => self.handle_search_key(key.code, key.modifiers),
+                    ToolbarMode::QueryEntry => self.handle_query_key(key.code, key.modifiers),
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
@@ -237,6 +260,13 @@ impl App {
                     DisplayMode::Raw => DisplayMode::Pretty,
                     DisplayMode::Pretty => DisplayMode::Raw,
                 };
+            }
+            (KeyCode::Char('e'), _) => {
+                if self.source_restart_tx.is_some() {
+                    self.toolbar_mode = ToolbarMode::QueryEntry;
+                    self.query_input = self.loki_query.clone();
+                    self.query_cursor = self.query_input.len();
+                }
             }
             _ => {}
         }
@@ -330,6 +360,77 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    fn handle_query_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Esc, _) => {
+                self.toolbar_mode = ToolbarMode::Normal;
+                self.query_input.clear();
+                self.query_cursor = 0;
+            }
+            (KeyCode::Enter, _) => {
+                self.submit_query();
+            }
+            (KeyCode::Backspace, _) => {
+                if self.query_cursor > 0 {
+                    self.query_cursor -= 1;
+                    self.query_input.remove(self.query_cursor);
+                }
+            }
+            (KeyCode::Delete, _) => {
+                if self.query_cursor < self.query_input.len() {
+                    self.query_input.remove(self.query_cursor);
+                }
+            }
+            (KeyCode::Left, _) => {
+                self.query_cursor = self.query_cursor.saturating_sub(1);
+            }
+            (KeyCode::Right, _) => {
+                self.query_cursor = (self.query_cursor + 1).min(self.query_input.len());
+            }
+            (KeyCode::Char(c), _) => {
+                self.query_input.insert(self.query_cursor, c);
+                self.query_cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn submit_query(&mut self) {
+        if self.query_input.is_empty() {
+            self.toolbar_mode = ToolbarMode::Normal;
+            return;
+        }
+
+        self.loki_query = self.query_input.clone();
+        self.toolbar_mode = ToolbarMode::Normal;
+
+        // Reset view state.
+        self.view_path.clear();
+        self.scroll = ScrollState::Tail;
+        self.h_scroll = 0;
+        self.current_entry_count = 0;
+        self.search = None;
+        self.tree_select_cursor = None;
+
+        // Signal the Loki source to restart with the new query.
+        if let Some(ref tx) = self.source_restart_tx {
+            let now = jiff::Zoned::now();
+            let start = now
+                .checked_sub(jiff::SignedDuration::from_hours(1))
+                .unwrap_or(now.clone());
+            let params = LokiSourceParams {
+                query: self.loki_query.clone(),
+                start_ns: start.timestamp().as_nanosecond(),
+                end_ns: None,
+                follow: true,
+            };
+            let _ = tx.send(Some(params));
+        }
+
+        self.query_input.clear();
+        self.query_cursor = 0;
     }
 
     // --- Scrolling ---
@@ -1072,10 +1173,12 @@ impl App {
                     None => String::new(),
                 };
 
-                let hints = if self.search.is_some() {
-                    "q:quit /:filter ?:search n/N:match Esc:clear v:view"
-                } else {
-                    "q:quit /:filter ?:search v:view"
+                let has_loki = self.source_restart_tx.is_some();
+                let hints = match (self.search.is_some(), has_loki) {
+                    (true, true) => "q:quit /:filter ?:search n/N:match Esc:clear e:query v:view",
+                    (true, false) => "q:quit /:filter ?:search n/N:match Esc:clear v:view",
+                    (false, true) => "q:quit /:filter ?:search e:query v:view",
+                    (false, false) => "q:quit /:filter ?:search v:view",
                 };
 
                 let status = format!(
@@ -1166,6 +1269,26 @@ impl App {
                     + 10;
                 let cursor_x =
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+            ToolbarMode::QueryEntry => {
+                let base_style = Style::default().bg(Color::Green).fg(Color::Black);
+
+                let query_text = format!(" Query: {}", self.query_input);
+                let spans = vec![Span::styled(query_text, base_style)];
+
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                let mut spans = spans;
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
+                frame.render_widget(paragraph, area);
+
+                // prefix: " Query: " = 9 chars
+                let cursor_x = area.x + 9 + self.query_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
         }
@@ -1283,7 +1406,11 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) ->
 }
 
 /// Run the TUI event loop. This takes ownership of stdout for rendering.
-pub(crate) async fn run_tui(arena: Arc<Mutex<Arena>>) -> Result<()> {
+pub(crate) async fn run_tui(
+    arena: Arc<Mutex<Arena>>,
+    restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
+    initial_query: Option<String>,
+) -> Result<()> {
     // Setup terminal.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
@@ -1291,7 +1418,7 @@ pub(crate) async fn run_tui(arena: Arc<Mutex<Arena>>) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = App::new(arena);
+    let mut app = App::new(arena, restart_tx, initial_query);
     let mut event_stream = EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 

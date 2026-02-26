@@ -4,7 +4,7 @@ use std::sync::mpsc;
 
 use serde::Deserialize;
 
-use super::RawLog;
+use super::{RawLog, SourceMessage};
 
 #[derive(Deserialize)]
 struct LogCliEntry {
@@ -19,7 +19,7 @@ struct LogCliEntry {
 /// Each line is tried as logcli-format JSON (`{"labels":..., "line":..., "timestamp":...}`).
 /// Lines that fail to parse as JSON are treated as plain text with the current
 /// timestamp and no labels.
-pub fn read_stdin(tx: mpsc::Sender<RawLog>) {
+pub fn read_stdin(tx: mpsc::Sender<SourceMessage>) {
     let stdin = std::io::stdin();
     let reader = stdin.lock();
 
@@ -54,7 +54,7 @@ pub fn read_stdin(tx: mpsc::Sender<RawLog>) {
             },
         };
 
-        if tx.send(raw_log).is_err() {
+        if tx.send(SourceMessage::Log(raw_log)).is_err() {
             break;
         }
     }

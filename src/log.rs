@@ -6,7 +6,7 @@ use std::{
 use lasso::{Spur, ThreadedRodeo};
 
 use crate::filter::Filter;
-use crate::source::RawLog;
+use crate::source::SourceMessage;
 
 /// Path from root to the currently active LogView.
 /// Empty = root. [0, 2] = root's child 0, then that node's child 2.
@@ -110,6 +110,24 @@ impl Arena {
                 entries: Vec::new(),
             },
         }))
+    }
+
+    /// Clear all entries, labels, structured fields, and the view tree.
+    /// Replaces the rodeos with fresh instances so new entries use clean interners.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.labels.clear();
+        self.structured_fields.clear();
+        self.rodeo = MetaRodeo {
+            messages: Arc::new(ThreadedRodeo::new()),
+            label_keys: Arc::new(ThreadedRodeo::new()),
+            label_values: Arc::new(ThreadedRodeo::new()),
+        };
+        self.root_view = LogView {
+            filters: Vec::new(),
+            children: Vec::new(),
+            entries: Vec::new(),
+        };
     }
 
     /// Navigate to a LogView by path.
@@ -249,16 +267,27 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 /// Fields to skip when collecting structured fields from nested JSON.
 const NESTED_JSON_SKIP_FIELDS: &[&str] = &["level", "message", "msg", "timestamp", "time", "ts"];
 
-pub(crate) fn ingest(rx: mpsc::Receiver<RawLog>, arena: Arc<Mutex<Arena>>) {
+pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>) {
     // TODO: hold received messages as PendingEntries for reordering
-    let rodeo = {
+    let mut rodeo = {
         let arena = arena.lock().unwrap();
         arena.rodeo.clone()
     };
 
     let mut label_pairs: Vec<(Spur, Spur)> = Vec::new();
     let mut sf_pairs: Vec<(Spur, Spur)> = Vec::new();
-    for incoming in rx.iter() {
+    for msg in rx.iter() {
+        let incoming = match msg {
+            SourceMessage::Reset => {
+                let mut arena = arena.lock().unwrap();
+                arena.clear();
+                rodeo = arena.rodeo.clone();
+                label_pairs.clear();
+                sf_pairs.clear();
+                continue;
+            }
+            SourceMessage::Log(raw) => raw,
+        };
         // Try to parse the message as nested JSON to extract structured fields.
         let (level, inner_message) =
             if let Ok(serde_json::Value::Object(map)) =
