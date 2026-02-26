@@ -29,6 +29,9 @@ async fn main() -> Result<()> {
     // Create channel for log ingestion. Sources send SourceMessages into `tx`.
     let (tx, rx) = mpsc::channel::<SourceMessage>();
 
+    // Route internal tracing events into the arena as native log entries.
+    util::set_internal_log_sender(tx.clone());
+
     // Spawn the ingest thread (blocking, uses std mpsc).
     let arena_clone = arena.clone();
     std::thread::spawn(move || {
