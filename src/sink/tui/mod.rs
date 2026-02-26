@@ -25,6 +25,13 @@ use crate::log::{Arena, LogView, ViewPath};
 enum ToolbarMode {
     Normal,
     FilterEntry,
+    SearchEntry,
+}
+
+/// Direction for search navigation.
+enum Direction {
+    Forward,
+    Backward,
 }
 
 /// Which filter matching mode is active during filter entry.
@@ -94,6 +101,10 @@ pub(crate) struct App {
     /// Current display mode (raw vs pretty).
     display_mode: DisplayMode,
 
+    /// Active search filter. When `Some`, matching entries are highlighted
+    /// and n/N navigation is available.
+    search: Option<Filter>,
+
     /// Map from screen row offset (relative to log list body top) to view
     /// entry index. Populated each render frame; used by mouse click handler.
     visible_row_map: Vec<usize>,
@@ -119,6 +130,7 @@ impl App {
             viewport_height: 0,
             tree_select_cursor: None,
             display_mode: DisplayMode::Pretty,
+            search: None,
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
         }
@@ -145,6 +157,7 @@ impl App {
                 match self.toolbar_mode {
                     ToolbarMode::Normal => self.handle_normal_key(key.code, key.modifiers),
                     ToolbarMode::FilterEntry => self.handle_filter_key(key.code, key.modifiers),
+                    ToolbarMode::SearchEntry => self.handle_search_key(key.code, key.modifiers),
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
@@ -204,6 +217,21 @@ impl App {
             (KeyCode::Char('['), _) => self.navigate_sibling(-1),
             (KeyCode::Char(']'), _) => self.navigate_sibling(1),
             (KeyCode::Tab, _) => self.enter_tree_select(),
+            (KeyCode::Char('?'), _) => {
+                self.toolbar_mode = ToolbarMode::SearchEntry;
+                self.filter_input.clear();
+                self.filter_cursor = 0;
+                self.filter_inverted = false;
+            }
+            (KeyCode::Char('n'), KeyModifiers::NONE) => {
+                self.jump_to_search_match(Direction::Forward);
+            }
+            (KeyCode::Char('N'), _) => {
+                self.jump_to_search_match(Direction::Backward);
+            }
+            (KeyCode::Esc, _) => {
+                self.search = None;
+            }
             (KeyCode::Char('v'), _) => {
                 self.display_mode = match self.display_mode {
                     DisplayMode::Raw => DisplayMode::Pretty,
@@ -224,6 +252,51 @@ impl App {
             }
             (KeyCode::Enter, _) => {
                 self.apply_filter();
+            }
+            (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
+                self.filter_entry_mode = match self.filter_entry_mode {
+                    FilterEntryMode::Substring => FilterEntryMode::Regex,
+                    FilterEntryMode::Regex => FilterEntryMode::Substring,
+                };
+            }
+            (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                self.filter_inverted = !self.filter_inverted;
+            }
+            (KeyCode::Backspace, _) => {
+                if self.filter_cursor > 0 {
+                    self.filter_cursor -= 1;
+                    self.filter_input.remove(self.filter_cursor);
+                }
+            }
+            (KeyCode::Delete, _) => {
+                if self.filter_cursor < self.filter_input.len() {
+                    self.filter_input.remove(self.filter_cursor);
+                }
+            }
+            (KeyCode::Left, _) => {
+                self.filter_cursor = self.filter_cursor.saturating_sub(1);
+            }
+            (KeyCode::Right, _) => {
+                self.filter_cursor = (self.filter_cursor + 1).min(self.filter_input.len());
+            }
+            (KeyCode::Char(c), _) => {
+                self.filter_input.insert(self.filter_cursor, c);
+                self.filter_cursor += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Esc, _) => {
+                self.toolbar_mode = ToolbarMode::Normal;
+                self.filter_input.clear();
+                self.filter_cursor = 0;
+                self.filter_inverted = false;
+            }
+            (KeyCode::Enter, _) => {
+                self.apply_search();
             }
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                 self.filter_entry_mode = match self.filter_entry_mode {
@@ -359,15 +432,7 @@ impl App {
         let parent = arena.view_at(&self.view_path);
         let mut child_entries = Vec::new();
         for &arena_idx in &parent.entries {
-            let resolved = arena.resolve_entry(arena_idx);
-            // Compute raw match across all fields, then apply inversion.
-            let raw = filter.raw_matches(resolved.message)
-                || resolved
-                    .labels
-                    .iter()
-                    .any(|(_, v)| filter.raw_matches(v));
-            let matches = if filter.inverted { !raw } else { raw };
-            if matches {
+            if entry_matches_filter(&arena, arena_idx, &filter) {
                 child_entries.push(arena_idx);
             }
         }
@@ -392,6 +457,78 @@ impl App {
         self.filter_cursor = 0;
         self.filter_inverted = false;
         self.toolbar_mode = ToolbarMode::Normal;
+    }
+
+    fn apply_search(&mut self) {
+        if self.filter_input.is_empty() {
+            self.search = None;
+            self.toolbar_mode = ToolbarMode::Normal;
+            return;
+        }
+
+        let mode = match self.filter_entry_mode {
+            FilterEntryMode::Substring => FilterMode::Substring(self.filter_input.clone()),
+            FilterEntryMode::Regex => match regex::Regex::new(&self.filter_input) {
+                Ok(re) => FilterMode::Regex(re),
+                Err(_) => {
+                    // TODO: show error feedback in toolbar
+                    return;
+                }
+            },
+        };
+
+        self.search = Some(Filter {
+            mode,
+            target: FilterTarget::Any,
+            inverted: self.filter_inverted,
+        });
+
+        self.filter_input.clear();
+        self.filter_cursor = 0;
+        self.filter_inverted = false;
+        self.toolbar_mode = ToolbarMode::Normal;
+    }
+
+    fn jump_to_search_match(&mut self, direction: Direction) {
+        let Some(filter) = &self.search else { return };
+
+        let Ok(arena) = self.arena.lock() else { return };
+        let view = arena.view_at(&self.view_path);
+        let total = view.entries.len();
+        if total == 0 {
+            return;
+        }
+
+        let current = match &self.scroll {
+            ScrollState::Tail => total.saturating_sub(1),
+            ScrollState::Selected(idx) => (*idx).min(total.saturating_sub(1)),
+        };
+
+        let count = total;
+        match direction {
+            Direction::Forward => {
+                for offset in 1..=count {
+                    let candidate = (current + offset) % total;
+                    let arena_idx = view.entries[candidate];
+                    if entry_matches_filter(&arena, arena_idx, filter) {
+                        self.scroll = ScrollState::Selected(candidate);
+                        self.h_scroll = 0;
+                        return;
+                    }
+                }
+            }
+            Direction::Backward => {
+                for offset in 1..=count {
+                    let candidate = (current + total - offset) % total;
+                    let arena_idx = view.entries[candidate];
+                    if entry_matches_filter(&arena, arena_idx, filter) {
+                        self.scroll = ScrollState::Selected(candidate);
+                        self.h_scroll = 0;
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     fn pop_filter(&mut self) {
@@ -678,7 +815,15 @@ impl App {
                     resolved.message.to_string()
                 };
 
-                Row::new(vec![Cell::from(timestamp_str), Cell::from(message)])
+                let mut row = Row::new(vec![Cell::from(timestamp_str), Cell::from(message)]);
+
+                if let Some(ref filter) = self.search {
+                    if entry_matches_filter(arena, arena_idx, filter) {
+                        row = row.style(Style::default().fg(Color::Yellow));
+                    }
+                }
+
+                row
             })
             .collect();
 
@@ -860,10 +1005,16 @@ impl App {
                 self.visible_row_map.push(view_idx);
             }
 
-            rows.push(
-                Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
-                    .height(row_height as u16),
-            );
+            let mut row = Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
+                .height(row_height as u16);
+
+            if let Some(ref filter) = self.search {
+                if entry_matches_filter(arena, arena_idx, filter) {
+                    row = row.style(Style::default().fg(Color::Yellow));
+                }
+            }
+
+            rows.push(row);
             accumulated += row_height;
         }
 
@@ -909,9 +1060,28 @@ impl App {
                     DisplayMode::Pretty => "PRETTY",
                 };
 
+                let search_indicator = match &self.search {
+                    Some(filter) => {
+                        let prefix = if filter.inverted { "!" } else { "" };
+                        let pattern = match &filter.mode {
+                            FilterMode::Substring(s) => format!("\"{}\"", s),
+                            FilterMode::Regex(r) => format!("/{}/", r.as_str()),
+                        };
+                        format!(" | ?:{}{}", prefix, pattern)
+                    }
+                    None => String::new(),
+                };
+
+                let hints = if self.search.is_some() {
+                    "q:quit /:filter ?:search n/N:match Esc:clear v:view"
+                } else {
+                    "q:quit /:filter ?:search v:view"
+                };
+
                 let status = format!(
-                    " {} | {} | Filters: {} | View: {}/{} entries | q:quit /:filter v:view",
+                    " {} | {} | Filters: {} | View: {}/{} entries{} | {}",
                     mode_indicator, display_label, filter_depth, entry_count, total_count,
+                    search_indicator, hints,
                 );
 
                 let paragraph = Paragraph::new(Line::from(status))
@@ -955,6 +1125,45 @@ impl App {
                 let prefix_len = 2 + mode_label.len() + 1
                     + if self.filter_inverted { 4 } else { 0 }
                     + 9;
+                let cursor_x =
+                    area.x + prefix_len as u16 + self.filter_cursor as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+            ToolbarMode::SearchEntry => {
+                let mode_label = match self.filter_entry_mode {
+                    FilterEntryMode::Substring => "SUB",
+                    FilterEntryMode::Regex => "RGX",
+                };
+
+                let base_style = Style::default().bg(Color::Magenta).fg(Color::White);
+
+                let mut spans = vec![
+                    Span::styled(format!(" [{}]", mode_label), base_style),
+                ];
+
+                if self.filter_inverted {
+                    spans.push(Span::styled(
+                        " NOT",
+                        Style::default().bg(Color::Red).fg(Color::White).bold(),
+                    ));
+                }
+
+                let search_text = format!(" Search: {}", self.filter_input);
+                spans.push(Span::styled(search_text, base_style));
+
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
+                frame.render_widget(paragraph, area);
+
+                // prefix spans: " [MODE]" + optional " NOT" + " Search: "
+                let prefix_len = 2 + mode_label.len() + 1
+                    + if self.filter_inverted { 4 } else { 0 }
+                    + 10;
                 let cursor_x =
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
@@ -1007,6 +1216,19 @@ impl App {
         list_state.select(Some(cursor));
         frame.render_stateful_widget(list, popup_area, &mut list_state);
     }
+}
+
+/// Test whether an arena entry matches a filter (for `FilterTarget::Any`).
+/// Used by both filter application and search highlighting.
+fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Filter) -> bool {
+    let resolved = arena.resolve_entry(arena_idx);
+    let raw = filter.raw_matches(resolved.message)
+        || resolved.labels.iter().any(|(_, v)| filter.raw_matches(v))
+        || resolved
+            .structured_fields
+            .iter()
+            .any(|(_, v)| filter.raw_matches(v));
+    if filter.inverted { !raw } else { raw }
 }
 
 /// Compute the row height for an entry in pretty mode.
