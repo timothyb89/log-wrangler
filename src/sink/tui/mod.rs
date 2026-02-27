@@ -684,6 +684,26 @@ impl App {
         }
     }
 
+    /// Build a temporary filter from the current filter input for live preview
+    /// highlighting. Returns `None` when not in filter entry mode, the input is
+    /// empty, or the regex is invalid.
+    fn preview_filter(&self) -> Option<Filter> {
+        if !matches!(self.toolbar_mode, ToolbarMode::FilterEntry | ToolbarMode::SearchEntry)
+            || self.filter_input.is_empty()
+        {
+            return None;
+        }
+        let mode = match self.filter_entry_mode {
+            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
+            FilterEntryMode::Regex => FilterMode::Regex(regex::Regex::new(&self.filter_input).ok()?),
+        };
+        Some(Filter {
+            mode,
+            target: FilterTarget::Any,
+            inverted: self.filter_inverted,
+        })
+    }
+
     /// Return the arena index of the currently selected entry, if any.
     fn selected_arena_idx(scroll: &ScrollState, arena: &Arena, view_path: &ViewPath) -> Option<usize> {
         if let ScrollState::Selected(view_idx) = *scroll {
@@ -967,6 +987,8 @@ impl App {
             self.visible_row_map.push(view_idx);
         }
 
+        let preview = self.preview_filter();
+
         let rows: Vec<Row> = (start_idx..end_idx)
             .map(|view_idx| {
                 let arena_idx = entries[view_idx];
@@ -982,11 +1004,18 @@ impl App {
 
                 let mut row = Row::new(vec![Cell::from(timestamp_str), Cell::from(message)]);
 
+                let mut style = Style::default();
                 if let Some(ref filter) = self.search {
                     if entry_matches_filter(arena, arena_idx, filter) {
-                        row = row.style(Style::default().fg(Color::Yellow));
+                        style = style.fg(Color::Yellow).bold();
                     }
                 }
+                if let Some(ref pf) = preview {
+                    if entry_matches_filter(arena, arena_idx, pf) {
+                        style = style.bold();
+                    }
+                }
+                row = row.style(style);
 
                 row
             })
@@ -1208,6 +1237,7 @@ impl App {
         };
 
         // Build rows from start_idx, accumulating heights until viewport full.
+        let preview = self.preview_filter();
         self.visible_row_map.clear();
         self.log_list_body_y = area.y + 1; // +1 for header row
         let mut rows: Vec<Row> = Vec::new();
@@ -1324,11 +1354,18 @@ impl App {
             let mut row = Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
                 .height(row_height as u16);
 
+            let mut style = Style::default();
             if let Some(ref filter) = self.search {
                 if entry_matches_filter(arena, arena_idx, filter) {
-                    row = row.style(Style::default().fg(Color::Yellow));
+                    style = style.fg(Color::Yellow).bold();
                 }
             }
+            if let Some(ref pf) = preview {
+                if entry_matches_filter(arena, arena_idx, pf) {
+                    style = style.bold();
+                }
+            }
+            row = row.style(style);
 
             rows.push(row);
             accumulated += row_height;
@@ -1488,7 +1525,7 @@ impl App {
                 // prefix spans: " [MODE]" + optional " NOT" + " Search: "
                 let prefix_len = 2 + mode_label.len() + 1
                     + if self.filter_inverted { 4 } else { 0 }
-                    + 10;
+                    + 9;
                 let cursor_x =
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
