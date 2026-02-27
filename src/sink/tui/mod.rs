@@ -114,6 +114,11 @@ pub(crate) struct App {
     /// The absolute Y coordinate where the log list body starts (after header).
     log_list_body_y: u16,
 
+    /// Persisted viewport start index for pretty mode. Kept stable across frames
+    /// so that arriving messages and selection changes within the visible range
+    /// do not shift the viewport.
+    pretty_viewport_start: Option<usize>,
+
     /// Current LogQL query string (for Loki sources).
     loki_query: String,
 
@@ -151,6 +156,7 @@ impl App {
             search: None,
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
+            pretty_viewport_start: None,
             loki_query: initial_query.unwrap_or_default(),
             query_input: String::new(),
             query_cursor: 0,
@@ -968,11 +974,18 @@ impl App {
             ScrollState::Selected(sel) => Some((*sel).min(total.saturating_sub(1))),
         };
 
-        // Compute start_idx. For Tail mode, work backward accounting for row
-        // heights (non-selected entries may still be multi-line from newlines).
-        // For Selected mode, use a centering heuristic then clamp.
+        // Compute start_idx.
+        //
+        // Tail mode: fill from the bottom (no persistent anchor).
+        // Selected mode: reuse the persisted viewport start when the selection
+        // is still visible; only scroll when the selection leaves the viewport.
+        // A small padding (SCROLL_PAD screen-lines) is added when the viewport
+        // *does* shift so the user sees context in the scroll direction.
+        const SCROLL_PAD: usize = 2;
+
         let start_idx = match &self.scroll {
             ScrollState::Tail => {
+                self.pretty_viewport_start = None;
                 let mut acc = 0usize;
                 let mut start = total;
                 while start > 0 {
@@ -987,8 +1000,112 @@ impl App {
             }
             ScrollState::Selected(sel) => {
                 let sel = (*sel).min(total.saturating_sub(1));
-                let half = visible_height / 2;
-                sel.saturating_sub(half).min(total.saturating_sub(1))
+
+                let start = if let Some(prev) = self.pretty_viewport_start {
+                    let prev = prev.min(total.saturating_sub(1));
+
+                    if sel < prev {
+                        // Selection moved above the viewport – scroll up.
+                        // Include a few padding lines above sel for context.
+                        let mut new_start = sel;
+                        let mut pad = 0;
+                        while new_start > 0 && pad < SCROLL_PAD {
+                            pad += pretty_row_height(
+                                arena,
+                                entries[new_start - 1],
+                                false,
+                            );
+                            new_start -= 1;
+                        }
+                        new_start
+                    } else {
+                        // Check whether sel is fully visible from prev.
+                        let mut acc = 0;
+                        let mut visible = false;
+                        for i in prev..total {
+                            let h = pretty_row_height(arena, entries[i], i == sel);
+                            if i == sel {
+                                visible = acc + h <= visible_height;
+                                break;
+                            }
+                            acc += h;
+                            if acc >= visible_height {
+                                break;
+                            }
+                        }
+
+                        if visible {
+                            // Selection still on-screen – keep viewport stable.
+                            prev
+                        } else {
+                            // Selection is below viewport – scroll down.
+                            // Place sel near the bottom with padding lines below.
+                            let sel_h =
+                                pretty_row_height(arena, entries[sel], true);
+                            let mut pad_below = 0;
+                            let mut pi = sel + 1;
+                            while pi < total && pad_below < SCROLL_PAD {
+                                pad_below +=
+                                    pretty_row_height(arena, entries[pi], false);
+                                pi += 1;
+                            }
+                            let space_above = visible_height
+                                .saturating_sub(sel_h)
+                                .saturating_sub(pad_below);
+
+                            let mut new_start = sel;
+                            let mut acc = 0;
+                            while new_start > 0 {
+                                let h = pretty_row_height(
+                                    arena,
+                                    entries[new_start - 1],
+                                    false,
+                                );
+                                if acc + h > space_above {
+                                    break;
+                                }
+                                acc += h;
+                                new_start -= 1;
+                            }
+                            new_start
+                        }
+                    }
+                } else {
+                    // No previous viewport – first entry into Selected mode.
+                    // Anchor from the bottom using correct expanded heights.
+                    let mut acc = 0usize;
+                    let mut bottom_start = total;
+                    while bottom_start > 0 {
+                        let idx = bottom_start - 1;
+                        let h =
+                            pretty_row_height(arena, entries[idx], idx == sel);
+                        if acc + h > visible_height {
+                            break;
+                        }
+                        acc += h;
+                        bottom_start -= 1;
+                    }
+
+                    if sel >= bottom_start {
+                        bottom_start
+                    } else {
+                        // sel is above the bottom viewport (e.g. Home pressed).
+                        let mut new_start = sel;
+                        let mut pad = 0;
+                        while new_start > 0 && pad < SCROLL_PAD {
+                            pad += pretty_row_height(
+                                arena,
+                                entries[new_start - 1],
+                                false,
+                            );
+                            new_start -= 1;
+                        }
+                        new_start
+                    }
+                };
+
+                self.pretty_viewport_start = Some(start);
+                start
             }
         };
 
@@ -1287,8 +1404,8 @@ impl App {
                 let paragraph = Paragraph::new(Line::from(spans));
                 frame.render_widget(paragraph, area);
 
-                // prefix: " Query: " = 9 chars
-                let cursor_x = area.x + 9 + self.query_cursor as u16;
+                // prefix: " Query: " = 8 chars
+                let cursor_x = area.x + 8 + self.query_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
         }
