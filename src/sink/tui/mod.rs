@@ -1001,31 +1001,64 @@ impl App {
             ScrollState::Selected(sel) => {
                 let sel = (*sel).min(total.saturating_sub(1));
 
+                // Place sel near the top of the viewport with SCROLL_PAD
+                // lines of context above it.
+                let pad_to_top = |sel: usize| -> usize {
+                    let mut s = sel;
+                    let mut pad = 0;
+                    while s > 0 && pad < SCROLL_PAD {
+                        pad += pretty_row_height(arena, entries[s - 1], false);
+                        s -= 1;
+                    }
+                    s
+                };
+
+                // Place sel near the bottom of the viewport with SCROLL_PAD
+                // lines of context below it.
+                let pad_to_bottom = |sel: usize| -> usize {
+                    let sel_h = pretty_row_height(arena, entries[sel], true);
+                    let mut pad_below = 0;
+                    let mut pi = sel + 1;
+                    while pi < total && pad_below < SCROLL_PAD {
+                        pad_below +=
+                            pretty_row_height(arena, entries[pi], false);
+                        pi += 1;
+                    }
+                    let space_above = visible_height
+                        .saturating_sub(sel_h)
+                        .saturating_sub(pad_below);
+                    let mut s = sel;
+                    let mut acc = 0;
+                    while s > 0 {
+                        let h = pretty_row_height(
+                            arena,
+                            entries[s - 1],
+                            false,
+                        );
+                        if acc + h > space_above {
+                            break;
+                        }
+                        acc += h;
+                        s -= 1;
+                    }
+                    s
+                };
+
                 let start = if let Some(prev) = self.pretty_viewport_start {
                     let prev = prev.min(total.saturating_sub(1));
 
                     if sel < prev {
-                        // Selection moved above the viewport – scroll up.
-                        // Include a few padding lines above sel for context.
-                        let mut new_start = sel;
-                        let mut pad = 0;
-                        while new_start > 0 && pad < SCROLL_PAD {
-                            pad += pretty_row_height(
-                                arena,
-                                entries[new_start - 1],
-                                false,
-                            );
-                            new_start -= 1;
-                        }
-                        new_start
+                        // Selection is above the viewport.
+                        pad_to_top(sel)
                     } else {
-                        // Check whether sel is fully visible from prev.
-                        let mut acc = 0;
-                        let mut visible = false;
+                        // Find sel's screen position relative to prev.
+                        let mut acc = 0usize;
+                        let mut sel_screen_top: Option<usize> = None;
                         for i in prev..total {
-                            let h = pretty_row_height(arena, entries[i], i == sel);
+                            let h =
+                                pretty_row_height(arena, entries[i], i == sel);
                             if i == sel {
-                                visible = acc + h <= visible_height;
+                                sel_screen_top = Some(acc);
                                 break;
                             }
                             acc += h;
@@ -1034,40 +1067,51 @@ impl App {
                             }
                         }
 
-                        if visible {
-                            // Selection still on-screen – keep viewport stable.
-                            prev
-                        } else {
-                            // Selection is below viewport – scroll down.
-                            // Place sel near the bottom with padding lines below.
-                            let sel_h =
-                                pretty_row_height(arena, entries[sel], true);
-                            let mut pad_below = 0;
-                            let mut pi = sel + 1;
-                            while pi < total && pad_below < SCROLL_PAD {
-                                pad_below +=
-                                    pretty_row_height(arena, entries[pi], false);
-                                pi += 1;
+                        match sel_screen_top {
+                            None => {
+                                // sel not reached – below viewport.
+                                pad_to_bottom(sel)
                             }
-                            let space_above = visible_height
-                                .saturating_sub(sel_h)
-                                .saturating_sub(pad_below);
-
-                            let mut new_start = sel;
-                            let mut acc = 0;
-                            while new_start > 0 {
-                                let h = pretty_row_height(
+                            Some(top) => {
+                                let sel_h = pretty_row_height(
                                     arena,
-                                    entries[new_start - 1],
-                                    false,
+                                    entries[sel],
+                                    true,
                                 );
-                                if acc + h > space_above {
-                                    break;
+                                let bottom = top + sel_h;
+
+                                // Padding margins (only where more entries
+                                // exist in that direction).
+                                let top_margin =
+                                    if sel > 0 { SCROLL_PAD } else { 0 };
+                                let bottom_margin =
+                                    if sel + 1 < total { SCROLL_PAD } else { 0 };
+
+                                if top_margin + sel_h + bottom_margin
+                                    > visible_height
+                                {
+                                    // Viewport too small for padding – just
+                                    // ensure basic visibility.
+                                    if bottom <= visible_height {
+                                        prev
+                                    } else {
+                                        pad_to_bottom(sel)
+                                    }
+                                } else if top < top_margin {
+                                    // sel encroaches on top margin – scroll up.
+                                    pad_to_top(sel)
+                                } else if bottom
+                                    > visible_height.saturating_sub(bottom_margin)
+                                {
+                                    // sel encroaches on bottom margin – scroll
+                                    // down.
+                                    pad_to_bottom(sel)
+                                } else {
+                                    // sel is comfortably within the padded
+                                    // region – keep viewport stable.
+                                    prev
                                 }
-                                acc += h;
-                                new_start -= 1;
                             }
-                            new_start
                         }
                     }
                 } else {
@@ -1089,18 +1133,7 @@ impl App {
                     if sel >= bottom_start {
                         bottom_start
                     } else {
-                        // sel is above the bottom viewport (e.g. Home pressed).
-                        let mut new_start = sel;
-                        let mut pad = 0;
-                        while new_start > 0 && pad < SCROLL_PAD {
-                            pad += pretty_row_height(
-                                arena,
-                                entries[new_start - 1],
-                                false,
-                            );
-                            new_start -= 1;
-                        }
-                        new_start
+                        pad_to_top(sel)
                     }
                 };
 
