@@ -14,7 +14,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState, Table, TableState};
 use ratatui::Frame;
 
 use crate::filter::{Filter, FilterMode, FilterTarget};
@@ -190,6 +190,12 @@ impl App {
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.scroll_proportional_down(2);
+                }
+                MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.scroll_proportional_up(2);
+                }
                 MouseEventKind::ScrollDown => self.scroll_down(),
                 MouseEventKind::ScrollUp => self.scroll_up(),
                 MouseEventKind::Down(MouseButton::Left) => {
@@ -214,6 +220,12 @@ impl App {
         match (code, modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
                 self.should_quit = true;
+            }
+            (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::SHIFT) => {
+                self.scroll_proportional_down(10);
+            }
+            (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::SHIFT) => {
+                self.scroll_proportional_up(10);
             }
             (KeyCode::Down | KeyCode::Char('j'), _) => self.scroll_down(),
             (KeyCode::Up | KeyCode::Char('k'), _) => self.scroll_up(),
@@ -501,6 +513,39 @@ impl App {
             }
             ScrollState::Selected(idx) => {
                 self.scroll = ScrollState::Selected(idx.saturating_sub(page));
+                self.h_scroll = 0;
+            }
+        }
+    }
+
+    fn scroll_proportional_down(&mut self, percent: usize) {
+        let jump = (self.current_entry_count * percent / 100).max(1);
+        match &self.scroll {
+            ScrollState::Tail => {}
+            ScrollState::Selected(idx) => {
+                let next = idx + jump;
+                if next >= self.current_entry_count {
+                    self.scroll = ScrollState::Tail;
+                } else {
+                    self.scroll = ScrollState::Selected(next);
+                }
+                self.h_scroll = 0;
+            }
+        }
+    }
+
+    fn scroll_proportional_up(&mut self, percent: usize) {
+        let jump = (self.current_entry_count * percent / 100).max(1);
+        match &self.scroll {
+            ScrollState::Tail => {
+                if self.current_entry_count > 0 {
+                    let target = self.current_entry_count.saturating_sub(jump);
+                    self.scroll = ScrollState::Selected(target);
+                    self.h_scroll = 0;
+                }
+            }
+            ScrollState::Selected(idx) => {
+                self.scroll = ScrollState::Selected(idx.saturating_sub(jump));
                 self.h_scroll = 0;
             }
         }
@@ -949,6 +994,13 @@ impl App {
         }
 
         frame.render_stateful_widget(table, area, &mut table_state);
+
+        // Scrollbar overlay.
+        let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 
     fn render_log_list_pretty(
@@ -1287,6 +1339,13 @@ impl App {
         table_state.select(table_select_idx);
 
         frame.render_stateful_widget(table, area, &mut table_state);
+
+        // Scrollbar overlay.
+        let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
     }
 
     fn render_toolbar(
