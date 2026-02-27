@@ -599,10 +599,11 @@ impl App {
         let child_idx = parent_mut.children.len();
         parent_mut.children.push(child);
 
-        // Navigate into the new child.
+        // Navigate into the new child, preserving the selected entry if possible.
+        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
         self.view_path.push(child_idx);
-        self.scroll = ScrollState::Tail;
         self.h_scroll = 0;
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
 
         self.filter_input.clear();
@@ -683,13 +684,47 @@ impl App {
         }
     }
 
+    /// Return the arena index of the currently selected entry, if any.
+    fn selected_arena_idx(scroll: &ScrollState, arena: &Arena, view_path: &ViewPath) -> Option<usize> {
+        if let ScrollState::Selected(view_idx) = *scroll {
+            let view = arena.view_at(view_path);
+            let clamped = view_idx.min(view.entries.len().saturating_sub(1));
+            view.entries.get(clamped).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Try to find the entry with the given arena index in the given view,
+    /// returning Selected if found, Tail otherwise.
+    fn reselect_scroll(arena: &Arena, view_path: &ViewPath, target: Option<usize>) -> ScrollState {
+        if let Some(target) = target {
+            let view = arena.view_at(view_path);
+            if let Some(pos) = view.entries.iter().position(|&e| e == target) {
+                ScrollState::Selected(pos)
+            } else {
+                ScrollState::Tail
+            }
+        } else {
+            ScrollState::Tail
+        }
+    }
+
     fn pop_filter(&mut self) {
         if self.view_path.is_empty() {
             return;
         }
+        let Ok(arena) = self.arena.lock() else { return };
+        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+        drop(arena);
         self.view_path.pop();
-        self.scroll = ScrollState::Tail;
         self.h_scroll = 0;
+        let Ok(arena) = self.arena.lock() else {
+            self.scroll = ScrollState::Tail;
+            return;
+        };
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+        drop(arena);
         self.update_from_arena();
     }
 
@@ -700,30 +735,15 @@ impl App {
             return;
         }
 
-        let child_idx = *self.view_path.last().unwrap();
-
-        // Move to the parent path first so we can address the child through it.
-        self.view_path.pop();
-        self.h_scroll = 0;
-
         let Ok(mut arena) = self.arena.lock() else {
-            self.scroll = ScrollState::Tail;
             return;
         };
 
-        // Capture the arena index of the currently selected entry (if any)
-        // before the child view is destroyed.
-        let selected_arena_idx: Option<usize> = if let ScrollState::Selected(view_idx) = self.scroll {
-            let parent = arena.view_at(&self.view_path);
-            if let Some(child) = parent.children.get(child_idx) {
-                let clamped = view_idx.min(child.entries.len().saturating_sub(1));
-                child.entries.get(clamped).copied()
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Capture the arena index while still at the child view.
+        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+
+        let child_idx = self.view_path.pop().unwrap();
+        self.h_scroll = 0;
 
         // Remove the child branch.
         {
@@ -732,18 +752,7 @@ impl App {
         }
 
         // Re-select the same entry in the parent view, if possible.
-        let new_scroll = if let Some(target) = selected_arena_idx {
-            let parent = arena.view_at(&self.view_path);
-            if let Some(pos) = parent.entries.iter().position(|&e| e == target) {
-                ScrollState::Selected(pos)
-            } else {
-                ScrollState::Tail
-            }
-        } else {
-            ScrollState::Tail
-        };
-
-        self.scroll = new_scroll;
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
     }
 
@@ -775,9 +784,10 @@ impl App {
             }
         };
 
+        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
         *self.view_path.last_mut().unwrap() = new_idx;
-        self.scroll = ScrollState::Tail;
         self.h_scroll = 0;
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
     }
 
     // --- Tree select ---
@@ -817,9 +827,12 @@ impl App {
                 let mut path: ViewPath = Vec::new();
                 Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
                 if let Some((selected_path, _)) = flat.get(cursor) {
-                    self.view_path = selected_path.clone();
-                    self.scroll = ScrollState::Tail;
-                    self.h_scroll = 0;
+                    if *selected_path != self.view_path {
+                        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+                        self.view_path = selected_path.clone();
+                        self.h_scroll = 0;
+                        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+                    }
                     self.current_entry_count =
                         arena.view_at(&self.view_path).entries.len();
                 }
