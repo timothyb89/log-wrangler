@@ -560,7 +560,7 @@ impl App {
         }
 
         let mode = match self.filter_entry_mode {
-            FilterEntryMode::Substring => FilterMode::Substring(self.filter_input.clone()),
+            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
             FilterEntryMode::Regex => match regex::Regex::new(&self.filter_input) {
                 Ok(re) => FilterMode::Regex(re),
                 Err(_) => {
@@ -582,7 +582,7 @@ impl App {
 
         // Build child LogView by testing parent entries against the filter.
         let parent = arena.view_at(&self.view_path);
-        let mut child_entries = Vec::new();
+        let mut child_entries = Vec::with_capacity(parent.entries.len());
         for &arena_idx in &parent.entries {
             if entry_matches_filter(&arena, arena_idx, &filter) {
                 child_entries.push(arena_idx);
@@ -619,7 +619,7 @@ impl App {
         }
 
         let mode = match self.filter_entry_mode {
-            FilterEntryMode::Substring => FilterMode::Substring(self.filter_input.clone()),
+            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
             FilterEntryMode::Regex => match regex::Regex::new(&self.filter_input) {
                 Ok(re) => FilterMode::Regex(re),
                 Err(_) => {
@@ -852,7 +852,7 @@ impl App {
                 .map(|f| {
                     let prefix = if f.inverted { "!" } else { "" };
                     match &f.mode {
-                        FilterMode::Substring(p) => format!("{}\"{}\"", prefix, p),
+                        FilterMode::Substring(p, _) => format!("{}\"{}\"", prefix, p),
                         FilterMode::Regex(r) => format!("{}/{}/", prefix, r.as_str()),
                     }
                 })
@@ -1374,7 +1374,7 @@ impl App {
                     Some(filter) => {
                         let prefix = if filter.inverted { "!" } else { "" };
                         let pattern = match &filter.mode {
-                            FilterMode::Substring(s) => format!("\"{}\"", s),
+                            FilterMode::Substring(s, _) => format!("\"{}\"", s),
                             FilterMode::Regex(r) => format!("/{}/", r.as_str()),
                         };
                         format!(" | ?:{}{}", prefix, pattern)
@@ -1552,14 +1552,39 @@ impl App {
 
 /// Test whether an arena entry matches a filter (for `FilterTarget::Any`).
 /// Used by both filter application and search highlighting.
+///
+/// Works directly with interned `LogEntry` fields to avoid the per-entry
+/// heap allocations that `resolve_entry()` would introduce.
 fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Filter) -> bool {
-    let resolved = arena.resolve_entry(arena_idx);
-    let raw = filter.raw_matches(resolved.message)
-        || resolved.labels.iter().any(|(_, v)| filter.raw_matches(v))
-        || resolved
-            .structured_fields
-            .iter()
-            .any(|(_, v)| filter.raw_matches(v));
+    let entry = &arena.entries[arena_idx];
+    let rodeo = &arena.rodeo;
+
+    let raw = match &filter.target {
+        crate::filter::FilterTarget::Message => {
+            let msg = rodeo.messages.resolve(&entry.message);
+            filter.raw_matches(msg)
+        }
+        crate::filter::FilterTarget::Any => {
+            let msg = rodeo.messages.resolve(&entry.message);
+            filter.raw_matches(msg)
+                || (0..entry.labels_length).any(|i| {
+                    let (_, v) = &arena.labels[entry.labels_start + i];
+                    filter.raw_matches(rodeo.label_values.resolve(v))
+                })
+                || (0..entry.structured_fields_length).any(|i| {
+                    let (_, v) =
+                        &arena.structured_fields[entry.structured_fields_start + i];
+                    filter.raw_matches(rodeo.label_values.resolve(v))
+                })
+        }
+        crate::filter::FilterTarget::Label(key_spur) => {
+            (0..entry.labels_length).any(|i| {
+                let (k, v) = &arena.labels[entry.labels_start + i];
+                k == key_spur && filter.raw_matches(rodeo.label_values.resolve(v))
+            })
+        }
+    };
+
     if filter.inverted { !raw } else { raw }
 }
 

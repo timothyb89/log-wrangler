@@ -1,11 +1,31 @@
+use std::fmt;
+
 use lasso::Spur;
+use memchr::memmem;
 use regex::Regex;
 
 /// How the filter matches against log content.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) enum FilterMode {
-    Substring(String),
+    /// SIMD-accelerated substring search via `memchr::memmem`.
+    Substring(String, memmem::Finder<'static>),
     Regex(Regex),
+}
+
+impl FilterMode {
+    pub fn substring(pattern: String) -> Self {
+        let finder = memmem::Finder::new(pattern.as_bytes()).into_owned();
+        Self::Substring(pattern, finder)
+    }
+}
+
+impl fmt::Debug for FilterMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Substring(pat, _) => f.debug_tuple("Substring").field(pat).finish(),
+            Self::Regex(re) => f.debug_tuple("Regex").field(re).finish(),
+        }
+    }
 }
 
 /// What field the filter applies to.
@@ -33,7 +53,7 @@ impl Filter {
     /// across multiple fields before applying inversion.
     pub fn raw_matches(&self, text: &str) -> bool {
         match &self.mode {
-            FilterMode::Substring(pat) => text.contains(pat.as_str()),
+            FilterMode::Substring(_, finder) => finder.find(text.as_bytes()).is_some(),
             FilterMode::Regex(re) => re.is_match(text),
         }
     }
