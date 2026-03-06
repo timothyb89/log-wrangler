@@ -11,7 +11,15 @@ use crate::filter::FilterMode;
 use crate::log::{Arena, LogView};
 
 use super::filter::entry_matches_filter;
-use super::{App, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, ToolbarMode};
+use super::{App, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
+
+fn format_timestamp(ts: &jiff::Zoned, mode: TimezoneMode) -> String {
+    let converted = match mode {
+        TimezoneMode::Local => ts.with_time_zone(jiff::tz::TimeZone::system()),
+        TimezoneMode::Utc => ts.with_time_zone(jiff::tz::TimeZone::UTC),
+    };
+    format!("{}", converted.strftime("%H:%M:%S%.3f"))
+}
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame) {
@@ -122,7 +130,7 @@ impl App {
                 let resolved = arena.resolve_entry(arena_idx);
                 let entry = &arena.entries[arena_idx];
 
-                let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
+                let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
 
                 let message = if Some(view_idx) == selected_view_idx {
                     resolved.message.chars().skip(self.h_scroll).collect()
@@ -430,7 +438,7 @@ impl App {
             };
 
             // Timestamp.
-            let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
+            let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
 
             // Level with semantic color.
             let level_cell = if let Some(lvl) = resolved.level {
@@ -615,6 +623,11 @@ impl App {
                     DisplayMode::Pretty => "PRETTY",
                 };
 
+                let tz_label = match self.timezone_mode {
+                    TimezoneMode::Local => "LOCAL",
+                    TimezoneMode::Utc => "UTC",
+                };
+
                 let search_indicator = match &self.search {
                     Some(filter) => {
                         let prefix = if filter.inverted { "!" } else { "" };
@@ -634,11 +647,11 @@ impl App {
                 if arena.source_names.len() > 1 {
                     hints.push_str(" s:sources");
                 }
-                hints.push_str(" a:add v:view");
+                hints.push_str(" a:add v:view t:tz");
 
                 let status = format!(
-                    " {} | {} | Filters: {} | View: {}/{} entries{} | {}",
-                    mode_indicator, display_label, filter_depth, entry_count, total_count,
+                    " {} | {} | {} | Filters: {} | View: {}/{} entries{} | {}",
+                    mode_indicator, display_label, tz_label, filter_depth, entry_count, total_count,
                     search_indicator, hints,
                 );
 

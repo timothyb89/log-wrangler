@@ -84,8 +84,9 @@ async fn main() -> Result<()> {
 
     // Spawn the ingest thread (blocking, uses std mpsc).
     let arena_clone = arena.clone();
+    let reorder_buffer = args.reorder_buffer;
     std::thread::spawn(move || {
-        log::ingest(rx, arena_clone);
+        log::ingest(rx, arena_clone, reorder_buffer);
     });
 
     // Spawn each source and collect per-source restart senders for Loki sources.

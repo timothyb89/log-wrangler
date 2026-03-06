@@ -2,7 +2,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
-use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, ToolbarMode};
+use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -120,6 +120,12 @@ impl App {
                 self.display_mode = match self.display_mode {
                     DisplayMode::Raw => DisplayMode::Pretty,
                     DisplayMode::Pretty => DisplayMode::Raw,
+                };
+            }
+            (KeyCode::Char('t'), _) => {
+                self.timezone_mode = match self.timezone_mode {
+                    TimezoneMode::Local => TimezoneMode::Utc,
+                    TimezoneMode::Utc => TimezoneMode::Local,
                 };
             }
             (KeyCode::Char('a'), _) => {

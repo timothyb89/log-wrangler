@@ -1,6 +1,7 @@
 use std::{
+    collections::BinaryHeap,
     sync::{mpsc, Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use lasso::{Spur, ThreadedRodeo};
@@ -47,19 +48,20 @@ struct PendingEntry {
 
 impl Ord for PendingEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        other.received.cmp(&self.received)
+        // Reversed for min-heap: oldest log timestamp pops first.
+        other.inner.timestamp.cmp(&self.inner.timestamp)
     }
 }
 
 impl PartialOrd for PendingEntry {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        self.received.partial_cmp(&other.received)
+        Some(self.cmp(other))
     }
 }
 
 impl PartialEq for PendingEntry {
     fn eq(&self, other: &Self) -> bool {
-        self.received == other.received
+        self.inner.timestamp == other.inner.timestamp
     }
 }
 
@@ -290,8 +292,130 @@ fn json_value_to_string(v: &serde_json::Value) -> String {
 /// Fields to skip when collecting structured fields from nested JSON.
 const NESTED_JSON_SKIP_FIELDS: &[&str] = &["level", "message", "msg", "timestamp", "time", "ts"];
 
-pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>) {
-    // TODO: hold received messages as PendingEntries for reordering
+/// Parse a RawLog into interned fields and store labels/structured_fields in the
+/// arena. Returns a LogEntry ready for insertion into `arena.entries`.
+fn parse_raw_log(
+    incoming: crate::source::RawLog,
+    rodeo: &MetaRodeo,
+    arena: &Arc<Mutex<Arena>>,
+    label_pairs: &mut Vec<(Spur, Spur)>,
+    sf_pairs: &mut Vec<(Spur, Spur)>,
+) -> LogEntry {
+    // Try to parse the message as nested JSON to extract structured fields.
+    let (level, inner_message) =
+        if let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(&incoming.message)
+        {
+            let level = map
+                .get("level")
+                .map(json_value_to_string)
+                .map(|s| rodeo.label_values.get_or_intern(s));
+
+            let inner_msg = map
+                .get("message")
+                .or_else(|| map.get("msg"))
+                .map(json_value_to_string)
+                .map(|s| rodeo.messages.get_or_intern(s));
+
+            for (k, v) in &map {
+                if NESTED_JSON_SKIP_FIELDS.contains(&k.as_str()) {
+                    continue;
+                }
+                let key = rodeo.label_keys.get_or_intern(k.as_str());
+                let val = rodeo.label_values.get_or_intern(json_value_to_string(v));
+                sf_pairs.push((key, val));
+            }
+
+            (level, inner_msg)
+        } else {
+            (None, None)
+        };
+
+    let message = rodeo.messages.get_or_intern(incoming.message);
+    for (raw_key, raw_value) in incoming.labels {
+        let k = rodeo.label_keys.get_or_intern(raw_key);
+        let v = rodeo.label_values.get_or_intern(raw_value);
+        label_pairs.push((k, v));
+    }
+
+    // Lock arena briefly to store labels and structured fields (indices are stable).
+    let mut arena = arena.lock().unwrap();
+    let start = arena.labels.len();
+    let count = label_pairs.len();
+    arena.labels.extend(label_pairs.drain(0..));
+
+    let sf_start = arena.structured_fields.len();
+    let sf_count = sf_pairs.len();
+    arena.structured_fields.extend(sf_pairs.drain(0..));
+
+    LogEntry {
+        timestamp: incoming.timestamp,
+        message,
+        source_id: incoming.source_id,
+        labels_start: start,
+        labels_length: count,
+        level,
+        inner_message,
+        structured_fields_start: sf_start,
+        structured_fields_length: sf_count,
+    }
+}
+
+/// Insert a LogEntry into the arena and propagate through the view tree.
+fn commit_entry(arena: &mut Arena, entry: LogEntry) {
+    let idx = arena.entries.len();
+    arena.entries.push(entry);
+    let a = &mut *arena;
+    let entry_ref = &a.entries[idx];
+    a.root_view.ingest(&a.rodeo, &a.labels, entry_ref, idx);
+}
+
+/// Flush all pending entries whose `received` time exceeds the buffer duration.
+fn flush_expired(heap: &mut BinaryHeap<PendingEntry>, buffer_duration: Duration, arena: &Arc<Mutex<Arena>>) {
+    let now = Instant::now();
+    let mut batch: Vec<LogEntry> = Vec::new();
+
+    while let Some(oldest) = heap.peek() {
+        if now.duration_since(oldest.received) >= buffer_duration {
+            batch.push(heap.pop().unwrap().inner);
+        } else {
+            break;
+        }
+    }
+
+    if batch.is_empty() {
+        return;
+    }
+
+    // Batch is popped in min-timestamp order from the heap, so already sorted.
+    let mut arena = arena.lock().unwrap();
+    for entry in batch {
+        commit_entry(&mut arena, entry);
+    }
+}
+
+/// Flush all remaining pending entries (e.g. on channel disconnect).
+fn flush_all(heap: &mut BinaryHeap<PendingEntry>, arena: &Arc<Mutex<Arena>>) {
+    let mut batch: Vec<LogEntry> = Vec::new();
+    while let Some(pending) = heap.pop() {
+        batch.push(pending.inner);
+    }
+
+    if batch.is_empty() {
+        return;
+    }
+
+    let mut arena = arena.lock().unwrap();
+    for entry in batch {
+        commit_entry(&mut arena, entry);
+    }
+}
+
+pub(crate) fn ingest(
+    rx: mpsc::Receiver<SourceMessage>,
+    arena: Arc<Mutex<Arena>>,
+    reorder_buffer: Option<Duration>,
+) {
     let rodeo = {
         let arena = arena.lock().unwrap();
         arena.rodeo.clone()
@@ -299,85 +423,54 @@ pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>
 
     let mut label_pairs: Vec<(Spur, Spur)> = Vec::new();
     let mut sf_pairs: Vec<(Spur, Spur)> = Vec::new();
-    for msg in rx.iter() {
-        let incoming = match msg {
-            SourceMessage::Reset { source_id } => {
-                let mut arena = arena.lock().unwrap();
-                arena.clear_source(source_id);
-                // Do NOT replace rodeos — other sources' entries still reference them.
-                continue;
-            }
-            SourceMessage::Log(raw) => raw,
-        };
-        // Try to parse the message as nested JSON to extract structured fields.
-        let (level, inner_message) =
-            if let Ok(serde_json::Value::Object(map)) =
-                serde_json::from_str::<serde_json::Value>(&incoming.message)
-            {
-                let level = map
-                    .get("level")
-                    .map(json_value_to_string)
-                    .map(|s| rodeo.label_values.get_or_intern(s));
 
-                let inner_msg = map
-                    .get("message")
-                    .or_else(|| map.get("msg"))
-                    .map(json_value_to_string)
-                    .map(|s| rodeo.messages.get_or_intern(s));
+    if let Some(buffer_duration) = reorder_buffer {
+        // Buffered path: hold messages and flush sorted by timestamp.
+        let check_interval = Duration::from_millis(250);
+        let mut heap: BinaryHeap<PendingEntry> = BinaryHeap::new();
 
-                for (k, v) in &map {
-                    if NESTED_JSON_SKIP_FIELDS.contains(&k.as_str()) {
-                        continue;
-                    }
-                    let key = rodeo.label_keys.get_or_intern(k.as_str());
-                    let val = rodeo.label_values.get_or_intern(json_value_to_string(v));
-                    sf_pairs.push((key, val));
+        loop {
+            match rx.recv_timeout(check_interval) {
+                Ok(SourceMessage::Reset { source_id }) => {
+                    // Discard buffered entries for this source, then clear arena.
+                    let remaining: Vec<PendingEntry> = heap.drain()
+                        .filter(|e| e.inner.source_id != source_id)
+                        .collect();
+                    heap.extend(remaining);
+
+                    let mut arena = arena.lock().unwrap();
+                    arena.clear_source(source_id);
                 }
+                Ok(SourceMessage::Log(raw)) => {
+                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs);
+                    heap.push(PendingEntry {
+                        inner: entry,
+                        received: Instant::now(),
+                    });
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    flush_all(&mut heap, &arena);
+                    return;
+                }
+            }
 
-                (level, inner_msg)
-            } else {
-                (None, None)
-            };
-
-        let message = rodeo.messages.get_or_intern(incoming.message);
-        for (raw_key, raw_value) in incoming.labels {
-            let k = rodeo.label_keys.get_or_intern(raw_key);
-            let v = rodeo.label_values.get_or_intern(raw_value);
-
-            label_pairs.push((k, v));
+            flush_expired(&mut heap, buffer_duration, &arena);
         }
-
-        let mut arena = arena.lock().unwrap();
-        let start = arena.labels.len();
-
-        let count = label_pairs.len();
-        arena.labels.extend(label_pairs.drain(0..));
-
-        let sf_start = arena.structured_fields.len();
-        let sf_count = sf_pairs.len();
-        arena.structured_fields.extend(sf_pairs.drain(0..));
-
-        let entry = LogEntry {
-            timestamp: incoming.timestamp,
-            message,
-            source_id: incoming.source_id,
-            labels_start: start,
-            labels_length: count,
-            level,
-            inner_message,
-            structured_fields_start: sf_start,
-            structured_fields_length: sf_count,
-        };
-
-        let idx = arena.entries.len();
-        arena.entries.push(entry);
-
-        // Propagate to the view tree. Deref the guard once so Rust can
-        // split the borrow across distinct Arena fields.
-        let a = &mut *arena;
-        let entry_ref = &a.entries[idx];
-        a.root_view.ingest(&a.rodeo, &a.labels, entry_ref, idx);
-
-        label_pairs.clear();
+    } else {
+        // Unbuffered path: insert directly in receipt order.
+        for msg in rx.iter() {
+            match msg {
+                SourceMessage::Reset { source_id } => {
+                    let mut arena = arena.lock().unwrap();
+                    arena.clear_source(source_id);
+                }
+                SourceMessage::Log(raw) => {
+                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs);
+                    let mut arena = arena.lock().unwrap();
+                    commit_entry(&mut arena, entry);
+                }
+            }
+        }
     }
 }

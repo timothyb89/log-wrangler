@@ -50,6 +50,15 @@ enum DisplayMode {
     Pretty,
 }
 
+/// Timezone display mode for timestamps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimezoneMode {
+    /// Display timestamps in the system's local timezone.
+    Local,
+    /// Display timestamps in UTC.
+    Utc,
+}
+
 /// Scroll state for the main log list.
 #[derive(Debug, Clone)]
 enum ScrollState {
@@ -137,6 +146,9 @@ pub(crate) struct App {
     /// Current display mode (raw vs pretty).
     display_mode: DisplayMode,
 
+    /// Current timezone display mode (local vs UTC).
+    timezone_mode: TimezoneMode,
+
     /// Active search filter. When `Some`, matching entries are highlighted
     /// and n/N navigation is available.
     search: Option<Filter>,
@@ -185,6 +197,7 @@ impl App {
             viewport_height: 0,
             overlay: OverlayMode::None,
             display_mode: DisplayMode::Pretty,
+            timezone_mode: TimezoneMode::Local,
             search: None,
             visible_row_map: Vec::new(),
             log_list_body_y: 0,

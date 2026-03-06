@@ -35,8 +35,14 @@ pub struct Args {
 
     /// Relative lookback duration, e.g. "1h", "30m", "2d".
     /// Defaults to 1h when neither --start nor --since is provided.
-    #[arg(long, conflicts_with = "start")]
-    pub since: Option<String>,
+    #[arg(long, conflicts_with = "start", value_parser = parse_std_duration)]
+    pub since: Option<std::time::Duration>,
+
+    /// Reorder buffer duration. When set, incoming messages are held for this
+    /// duration to allow out-of-order messages to be sorted by timestamp.
+    /// Example: "5s", "30s".
+    #[arg(long, value_parser = parse_std_duration)]
+    pub reorder_buffer: Option<std::time::Duration>,
 
     /// Follow mode: stream new logs via WebSocket after initial fetch.
     #[arg(long)]
@@ -46,7 +52,7 @@ pub struct Args {
 /// Resolve the start time from CLI args.
 pub fn resolve_start_time(
     start: &Option<String>,
-    since: &Option<String>,
+    since: &Option<std::time::Duration>,
     now: &jiff::Zoned,
 ) -> Result<jiff::Zoned> {
     if let Some(s) = start {
@@ -57,8 +63,10 @@ pub fn resolve_start_time(
             })
             .map_err(|e| eyre!("Invalid --start time '{}': {}", s, e))?)
     } else {
-        let dur = since.as_deref().unwrap_or("1h");
-        let duration = parse_duration(dur)?;
+        let duration = match since {
+            Some(d) => jiff::SignedDuration::from_secs(d.as_secs() as i64),
+            None => parse_duration("1h")?,
+        };
         Ok(now.checked_sub(duration)
             .map_err(|e| eyre!("Failed to subtract duration from now: {}", e))?)
     }
@@ -76,6 +84,12 @@ pub fn resolve_end_time(end: &Option<String>, now: &jiff::Zoned) -> Result<jiff:
             .map_err(|e| eyre!("Invalid --end time '{}': {}", s, e))?),
         None => Ok(now.clone()),
     }
+}
+
+/// Parse a human-readable duration string into `std::time::Duration` for use as
+/// a clap `value_parser`.
+fn parse_std_duration(s: &str) -> Result<std::time::Duration> {
+    parse_duration(s).map(|d| std::time::Duration::from_secs(d.as_secs().unsigned_abs()))
 }
 
 /// Parse a human-readable duration string like "1h", "30m", "2d", "1h30m".
