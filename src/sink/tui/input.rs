@@ -20,13 +20,16 @@ impl App {
                         self.handle_source_select_key(key.code, key.modifiers);
                         return;
                     }
+                    OverlayMode::SourceDialog(_) => {
+                        self.handle_source_dialog_key(key.code, key.modifiers);
+                        return;
+                    }
                     OverlayMode::None => {}
                 }
                 match self.toolbar_mode {
                     ToolbarMode::Normal => self.handle_normal_key(key.code, key.modifiers),
                     ToolbarMode::FilterEntry => self.handle_filter_key(key.code, key.modifiers),
                     ToolbarMode::SearchEntry => self.handle_search_key(key.code, key.modifiers),
-                    ToolbarMode::QueryEntry => self.handle_query_key(key.code, key.modifiers),
                 }
             }
             Event::Mouse(mouse) => match mouse.kind {
@@ -119,15 +122,14 @@ impl App {
                     DisplayMode::Pretty => DisplayMode::Raw,
                 };
             }
-            (KeyCode::Char('e'), _) => {
-                if !self.loki_restarts.is_empty() {
-                    self.toolbar_mode = ToolbarMode::QueryEntry;
-                    let query = self.loki_restarts.get(self.active_loki_idx)
-                        .map(|r| r.query.clone())
-                        .unwrap_or_default();
-                    self.query_input = query;
-                    self.query_cursor = self.query_input.len();
-                }
+            (KeyCode::Char('a'), _) => {
+                self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                    mode: super::SourceDialogMode::Add,
+                    fields: [String::new(), String::new(), String::new()],
+                    cursors: [0, 0, 0],
+                    active_field: 1, // start on URL field
+                    error: None,
+                });
             }
             (KeyCode::Char('s'), _) => {
                 self.enter_source_select();
@@ -226,36 +228,101 @@ impl App {
         }
     }
 
-    fn handle_query_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+    fn handle_source_dialog_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        let state = match &mut self.overlay {
+            OverlayMode::SourceDialog(s) => s,
+            _ => return,
+        };
+
+        // Determine which fields are editable.
+        let editable: &[usize] = match &state.mode {
+            super::SourceDialogMode::Add => &[0, 1, 2],    // name, url, query
+            super::SourceDialogMode::Edit { .. } => &[2],   // query only
+        };
+
         match (code, modifiers) {
             (KeyCode::Esc, _) => {
-                self.toolbar_mode = ToolbarMode::Normal;
-                self.query_input.clear();
-                self.query_cursor = 0;
+                self.overlay = OverlayMode::None;
+            }
+            (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                if editable.len() <= 1 {
+                    return;
+                }
+                let current_pos = editable.iter().position(|&f| f == state.active_field).unwrap_or(0);
+                let next_pos = if code == KeyCode::BackTab {
+                    (current_pos + editable.len() - 1) % editable.len()
+                } else {
+                    (current_pos + 1) % editable.len()
+                };
+                state.active_field = editable[next_pos];
             }
             (KeyCode::Enter, _) => {
-                self.submit_query();
+                self.submit_source_dialog();
             }
             (KeyCode::Backspace, _) => {
-                if self.query_cursor > 0 {
-                    self.query_cursor -= 1;
-                    self.query_input.remove(self.query_cursor);
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                if state.cursors[f] > 0 {
+                    state.cursors[f] -= 1;
+                    state.fields[f].remove(state.cursors[f]);
                 }
             }
             (KeyCode::Delete, _) => {
-                if self.query_cursor < self.query_input.len() {
-                    self.query_input.remove(self.query_cursor);
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                if state.cursors[f] < state.fields[f].len() {
+                    state.fields[f].remove(state.cursors[f]);
                 }
             }
             (KeyCode::Left, _) => {
-                self.query_cursor = self.query_cursor.saturating_sub(1);
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                state.cursors[f] = state.cursors[f].saturating_sub(1);
             }
             (KeyCode::Right, _) => {
-                self.query_cursor = (self.query_cursor + 1).min(self.query_input.len());
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                state.cursors[f] = (state.cursors[f] + 1).min(state.fields[f].len());
+            }
+            (KeyCode::Home, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                state.cursors[state.active_field] = 0;
+            }
+            (KeyCode::End, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                state.cursors[f] = state.fields[f].len();
             }
             (KeyCode::Char(c), _) => {
-                self.query_input.insert(self.query_cursor, c);
-                self.query_cursor += 1;
+                let state = match &mut self.overlay {
+                    OverlayMode::SourceDialog(s) => s,
+                    _ => return,
+                };
+                let f = state.active_field;
+                state.fields[f].insert(state.cursors[f], c);
+                state.cursors[f] += 1;
             }
             _ => {}
         }

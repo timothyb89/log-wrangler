@@ -75,7 +75,9 @@ impl App {
                 self.overlay = OverlayMode::None;
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.overlay = OverlayMode::SourceSelect { cursor: cursor.saturating_sub(1) };
+                self.overlay = OverlayMode::SourceSelect {
+                    cursor: cursor.saturating_sub(1),
+                };
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let Ok(arena) = self.arena.lock() else { return };
@@ -89,8 +91,48 @@ impl App {
                 self.overlay = OverlayMode::None;
                 self.apply_source_filter(source_id);
             }
+            KeyCode::Char('e') => {
+                let source_id = cursor as u16;
+                self.overlay = OverlayMode::None;
+                self.open_edit_dialog_for_source(source_id);
+            }
+            KeyCode::Char('a') => {
+                self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                    mode: super::SourceDialogMode::Add,
+                    fields: [String::new(), String::new(), String::new()],
+                    cursors: [0, 0, 0],
+                    active_field: 1,
+                    error: None,
+                });
+            }
             _ => {}
         }
+    }
+
+    /// Open the source edit dialog for a specific Loki source by its source_id.
+    pub(super) fn open_edit_dialog_for_source(&mut self, source_id: u16) {
+        let Some(loki_idx) = self.loki_restarts.iter().position(|r| r.source_id == source_id) else {
+            return;
+        };
+        self.open_edit_dialog_for_loki_idx(loki_idx);
+    }
+
+    /// Open the source edit dialog for a Loki source by its index in `loki_restarts`.
+    pub(super) fn open_edit_dialog_for_loki_idx(&mut self, loki_idx: usize) {
+        let Some(restart) = self.loki_restarts.get(loki_idx) else {
+            return;
+        };
+        self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+            mode: super::SourceDialogMode::Edit { loki_idx },
+            fields: [
+                restart.name.clone(),
+                String::new(),
+                restart.query.clone(),
+            ],
+            cursors: [0, 0, restart.query.len()],
+            active_field: 2, // focus on query
+            error: None,
+        });
     }
 
     /// Flatten the view tree into (path, display-line) pairs for the overlay.

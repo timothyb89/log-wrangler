@@ -3,6 +3,7 @@ mod input;
 mod render;
 mod tree;
 
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -16,6 +17,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::filter::Filter;
 use crate::log::{Arena, ViewPath};
+use crate::source::SourceMessage;
 use crate::source::loki::LokiSourceParams;
 
 /// The mode the bottom toolbar is in.
@@ -24,7 +26,6 @@ enum ToolbarMode {
     Normal,
     FilterEntry,
     SearchEntry,
-    QueryEntry,
 }
 
 /// Direction for search navigation.
@@ -63,6 +64,27 @@ enum OverlayMode {
     None,
     TreeSelect { cursor: usize },
     SourceSelect { cursor: usize },
+    SourceDialog(SourceDialogState),
+}
+
+/// State for the add/edit source dialog overlay.
+struct SourceDialogState {
+    mode: SourceDialogMode,
+    /// [name, url, query]
+    fields: [String; 3],
+    /// Cursor position per field.
+    cursors: [usize; 3],
+    /// Index of the currently active (focused) field: 0=name, 1=url, 2=query.
+    active_field: usize,
+    /// Validation error to display, if any.
+    error: Option<String>,
+}
+
+enum SourceDialogMode {
+    /// All fields editable.
+    Add,
+    /// Only query editable. `loki_idx` indexes into `App::loki_restarts`.
+    Edit { loki_idx: usize },
 }
 
 /// Per-source restart state for Loki sources.
@@ -131,22 +153,23 @@ pub(crate) struct App {
     /// do not shift the viewport.
     pretty_viewport_start: Option<usize>,
 
-    /// Text buffer for query editing input.
-    query_input: String,
-
-    /// Cursor position within query_input.
-    query_cursor: usize,
-
     /// Per-source Loki restart state. Empty when no Loki sources exist.
     loki_restarts: Vec<SourceRestart>,
 
-    /// Index into `loki_restarts` for the currently active query edit.
-    /// When there's exactly one Loki source, this is always 0.
-    active_loki_idx: usize,
+    /// Sender for the log ingest channel. Cloned for each dynamically-added source.
+    ingest_tx: mpsc::Sender<SourceMessage>,
+
+    /// Next source ID to assign when adding a source at runtime.
+    next_source_id: u16,
 }
 
 impl App {
-    fn new(arena: Arc<Mutex<Arena>>, loki_restarts: Vec<SourceRestart>) -> Self {
+    fn new(
+        arena: Arc<Mutex<Arena>>,
+        loki_restarts: Vec<SourceRestart>,
+        ingest_tx: mpsc::Sender<SourceMessage>,
+        next_source_id: u16,
+    ) -> Self {
         Self {
             arena,
             view_path: Vec::new(),
@@ -166,10 +189,9 @@ impl App {
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
             pretty_viewport_start: None,
-            query_input: String::new(),
-            query_cursor: 0,
             loki_restarts,
-            active_loki_idx: 0,
+            ingest_tx,
+            next_source_id,
         }
     }
 
@@ -184,6 +206,8 @@ impl App {
 pub(crate) async fn run_tui(
     arena: Arc<Mutex<Arena>>,
     loki_restarts: Vec<SourceRestart>,
+    ingest_tx: mpsc::Sender<SourceMessage>,
+    next_source_id: u16,
 ) -> Result<()> {
     // Setup terminal.
     enable_raw_mode()?;
@@ -192,7 +216,7 @@ pub(crate) async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = App::new(arena, loki_restarts);
+    let mut app = App::new(arena, loki_restarts, ingest_tx, next_source_id);
     let mut event_stream = EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 

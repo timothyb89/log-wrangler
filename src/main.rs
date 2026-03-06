@@ -90,6 +90,7 @@ async fn main() -> Result<()> {
 
     // Spawn each source and collect per-source restart senders for Loki sources.
     let mut loki_restarts: Vec<sink::tui::SourceRestart> = Vec::new();
+    let num_cli_sources = sources.len();
 
     for src in sources {
         match src.config {
@@ -149,11 +150,10 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Drop our copy so ingest thread can detect when all sources close.
-    drop(tx);
+    let next_source_id = num_cli_sources as u16;
 
     // Run the TUI on the async runtime.
-    sink::tui::run_tui(arena, loki_restarts).await?;
+    sink::tui::run_tui(arena, loki_restarts, tx, next_source_id).await?;
 
     Ok(())
 }

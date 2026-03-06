@@ -2,43 +2,132 @@ use crate::filter::{Filter, FilterMode, FilterTarget};
 use crate::log::{Arena, LogView, ViewPath};
 use crate::source::loki::LokiSourceParams;
 
-use super::{App, Direction, FilterEntryMode, ScrollState, ToolbarMode};
+use super::{App, Direction, FilterEntryMode, OverlayMode, ScrollState, SourceDialogMode, SourceRestart, ToolbarMode};
 
 impl App {
-    pub(super) fn submit_query(&mut self) {
-        if self.query_input.is_empty() {
-            self.toolbar_mode = ToolbarMode::Normal;
-            return;
+    pub(super) fn submit_source_dialog(&mut self) {
+        let state = match &self.overlay {
+            OverlayMode::SourceDialog(s) => s,
+            _ => return,
+        };
+
+        match &state.mode {
+            SourceDialogMode::Add => {
+                let url_str = state.fields[1].trim();
+                let query = state.fields[2].trim();
+
+                if url_str.is_empty() || query.is_empty() {
+                    let state = match &mut self.overlay {
+                        OverlayMode::SourceDialog(s) => s,
+                        _ => return,
+                    };
+                    state.error = Some("URL and Query are required".to_string());
+                    return;
+                }
+
+                let base_url = match url::Url::parse(url_str) {
+                    Ok(u) => u,
+                    Err(e) => {
+                        let state = match &mut self.overlay {
+                            OverlayMode::SourceDialog(s) => s,
+                            _ => return,
+                        };
+                        state.error = Some(format!("Invalid URL: {}", e));
+                        return;
+                    }
+                };
+
+                let name = {
+                    let n = state.fields[0].trim();
+                    if n.is_empty() {
+                        format!("loki-{}", self.next_source_id)
+                    } else {
+                        n.to_string()
+                    }
+                };
+                let query = query.to_string();
+
+                self.spawn_loki_source(name, base_url, query);
+                self.overlay = OverlayMode::None;
+            }
+            SourceDialogMode::Edit { loki_idx } => {
+                let loki_idx = *loki_idx;
+                let new_query = state.fields[2].trim().to_string();
+
+                if new_query.is_empty() {
+                    let state = match &mut self.overlay {
+                        OverlayMode::SourceDialog(s) => s,
+                        _ => return,
+                    };
+                    state.error = Some("Query cannot be empty".to_string());
+                    return;
+                }
+
+                // Signal restart with the new query.
+                if let Some(restart) = self.loki_restarts.get_mut(loki_idx) {
+                    restart.query = new_query.clone();
+                    let now = jiff::Zoned::now();
+                    let start = now
+                        .checked_sub(jiff::SignedDuration::from_hours(1))
+                        .unwrap_or(now.clone());
+                    let params = LokiSourceParams {
+                        query: new_query,
+                        start_ns: start.timestamp().as_nanosecond(),
+                        end_ns: None,
+                        follow: true,
+                    };
+                    let _ = restart.tx.send(Some(params));
+                }
+
+                self.overlay = OverlayMode::None;
+
+                // Reset view to root in tail mode.
+                self.view_path.clear();
+                self.scroll = ScrollState::Tail;
+                self.h_scroll = 0;
+                self.current_entry_count = 0;
+                self.search = None;
+            }
+        }
+    }
+
+    fn spawn_loki_source(&mut self, name: String, base_url: url::Url, query: String) {
+        let source_id = self.next_source_id;
+        self.next_source_id += 1;
+
+        // Register in arena.
+        {
+            let mut arena = self.arena.lock().unwrap();
+            if source_id as usize >= arena.source_names.len() {
+                arena.source_names.resize(source_id as usize + 1, String::new());
+            }
+            arena.source_names[source_id as usize] = name.clone();
         }
 
-        self.toolbar_mode = ToolbarMode::Normal;
+        let (wtx, wrx) = tokio::sync::watch::channel(None);
 
-        // Reset view state.
-        self.view_path.clear();
-        self.scroll = ScrollState::Tail;
-        self.h_scroll = 0;
-        self.current_entry_count = 0;
-        self.search = None;
-        self.overlay = super::OverlayMode::None;
+        let now = jiff::Zoned::now();
+        let start = now
+            .checked_sub(jiff::SignedDuration::from_hours(1))
+            .unwrap_or(now.clone());
+        let params = LokiSourceParams {
+            query: query.clone(),
+            start_ns: start.timestamp().as_nanosecond(),
+            end_ns: None,
+            follow: true,
+        };
 
-        // Signal the active Loki source to restart with the new query.
-        if let Some(restart) = self.loki_restarts.get_mut(self.active_loki_idx) {
-            restart.query = self.query_input.clone();
-            let now = jiff::Zoned::now();
-            let start = now
-                .checked_sub(jiff::SignedDuration::from_hours(1))
-                .unwrap_or(now.clone());
-            let params = LokiSourceParams {
-                query: restart.query.clone(),
-                start_ns: start.timestamp().as_nanosecond(),
-                end_ns: None,
-                follow: true,
-            };
-            let _ = restart.tx.send(Some(params));
-        }
+        let tx = self.ingest_tx.clone();
+        tokio::spawn(crate::source::loki::run_loki_source(
+            base_url, params, tx, wrx, source_id,
+        ));
 
-        self.query_input.clear();
-        self.query_cursor = 0;
+        self.loki_restarts.push(SourceRestart {
+            source_id,
+            name,
+            tx: wtx,
+            query,
+        });
     }
 
     pub(super) fn apply_filter(&mut self) {

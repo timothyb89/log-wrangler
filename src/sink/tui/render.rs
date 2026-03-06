@@ -40,6 +40,9 @@ impl App {
             OverlayMode::SourceSelect { .. } => {
                 self.render_source_select_overlay(frame, frame.area(), &arena);
             }
+            OverlayMode::SourceDialog(_) => {
+                self.render_source_dialog(frame, frame.area());
+            }
             OverlayMode::None => {}
         }
     }
@@ -51,6 +54,16 @@ impl App {
         arena: &Arena,
         view: &LogView,
     ) {
+        // Show empty state prompt when no entries and no Loki sources.
+        if view.entries.is_empty() && self.loki_restarts.is_empty() {
+            let msg = Paragraph::new("No sources configured. Press `a` to add a Loki source.")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(ratatui::layout::Alignment::Center);
+            let y = area.y + area.height / 2;
+            let prompt_area = ratatui::layout::Rect::new(area.x, y, area.width, 1);
+            frame.render_widget(msg, prompt_area);
+            return;
+        }
         match self.display_mode {
             DisplayMode::Raw => self.render_log_list_raw(frame, area, arena, view),
             DisplayMode::Pretty => self.render_log_list_pretty(frame, area, arena, view),
@@ -618,13 +631,10 @@ impl App {
                 if self.search.is_some() {
                     hints.push_str(" n/N:match Esc:clear");
                 }
-                if !self.loki_restarts.is_empty() {
-                    hints.push_str(" e:query");
-                }
                 if arena.source_names.len() > 1 {
                     hints.push_str(" s:sources");
                 }
-                hints.push_str(" v:view");
+                hints.push_str(" a:add v:view");
 
                 let status = format!(
                     " {} | {} | Filters: {} | View: {}/{} entries{} | {}",
@@ -716,26 +726,6 @@ impl App {
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
-            ToolbarMode::QueryEntry => {
-                let base_style = Style::default().bg(Color::Green).fg(Color::Black);
-
-                let query_text = format!(" Query: {}", self.query_input);
-                let spans = vec![Span::styled(query_text, base_style)];
-
-                let used: usize = spans.iter().map(|s| s.content.len()).sum();
-                let remaining = (area.width as usize).saturating_sub(used);
-                let mut spans = spans;
-                if remaining > 0 {
-                    spans.push(Span::styled(" ".repeat(remaining), base_style));
-                }
-
-                let paragraph = Paragraph::new(Line::from(spans));
-                frame.render_widget(paragraph, area);
-
-                // prefix: " Query: " = 8 chars
-                let cursor_x = area.x + 8 + self.query_cursor as u16;
-                frame.set_cursor_position((cursor_x, area.y));
-            }
         }
     }
 
@@ -818,7 +808,7 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Sources ")
-                    .title_bottom(" ↑↓ / j k : navigate   Enter : filter   Esc : cancel "),
+                    .title_bottom(" Enter : filter   e : edit   a : add   Esc : cancel "),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol("> ");
@@ -826,6 +816,139 @@ impl App {
         let mut list_state = ListState::default();
         list_state.select(Some(cursor));
         frame.render_stateful_widget(list, popup_area, &mut list_state);
+    }
+
+    fn render_source_dialog(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let state = match &self.overlay {
+            OverlayMode::SourceDialog(s) => s,
+            _ => return,
+        };
+
+        let is_add = matches!(state.mode, super::SourceDialogMode::Add);
+        let title = if is_add {
+            " Add Loki Source ".to_string()
+        } else {
+            format!(" Edit: {} ", state.fields[0])
+        };
+
+        // Dialog dimensions: fixed height, centered horizontally.
+        let dialog_height = if is_add { 9 } else { 8 };
+        let popup_area = centered_rect_fixed(60, dialog_height, area);
+        frame.render_widget(Clear, popup_area);
+
+        let hint = if is_add {
+            " Tab: next field   Enter: connect   Esc: cancel "
+        } else {
+            " Enter: apply   Esc: cancel "
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(title.as_str())
+            .title_bottom(hint);
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        // Layout fields vertically inside the inner area.
+        let field_width = inner.width.saturating_sub(10) as usize; // label takes ~8 chars + padding
+
+        let mut y = inner.y;
+        let label_x = inner.x + 2;
+        let field_x = inner.x + 10;
+        let dim_style = Style::default().fg(Color::DarkGray);
+        let active_style = Style::default().fg(Color::White);
+        let inactive_style = Style::default().fg(Color::Gray);
+        let error_style = Style::default().fg(Color::Red);
+
+        // Cursor position (set at end).
+        let mut cursor_pos: Option<(u16, u16)> = None;
+
+        // Helper: render one field line.
+        let render_field = |frame: &mut Frame,
+                            label: &str,
+                            value: &str,
+                            cursor: usize,
+                            is_active: bool,
+                            is_editable: bool,
+                            row_y: u16,
+                            field_width: usize,
+                            cursor_pos: &mut Option<(u16, u16)>| {
+            let label_span = Span::styled(
+                format!("{:>7}: ", label),
+                if is_editable { inactive_style } else { dim_style },
+            );
+            frame.render_widget(
+                Paragraph::new(Line::from(label_span)),
+                ratatui::layout::Rect::new(label_x, row_y, 10, 1),
+            );
+
+            // Horizontal scroll for long values.
+            let scroll_offset = if is_active && cursor > field_width.saturating_sub(2) {
+                cursor - field_width.saturating_sub(2)
+            } else {
+                0
+            };
+            let visible: String = value.chars().skip(scroll_offset).take(field_width).collect();
+
+            let style = if is_active {
+                active_style
+            } else if is_editable {
+                inactive_style
+            } else {
+                dim_style
+            };
+
+            if is_editable {
+                // Render with bracket indicators for editable fields.
+                let field_text = format!("{:<width$}", visible, width = field_width);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(field_text, style))),
+                    ratatui::layout::Rect::new(field_x, row_y, field_width as u16, 1),
+                );
+            } else {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(&visible, style))),
+                    ratatui::layout::Rect::new(field_x, row_y, field_width as u16, 1),
+                );
+            }
+
+            if is_active {
+                let cursor_x = field_x + (cursor - scroll_offset) as u16;
+                *cursor_pos = Some((cursor_x, row_y));
+            }
+        };
+
+        if is_add {
+            // Name field.
+            y += 1;
+            render_field(frame, "Name", &state.fields[0], state.cursors[0],
+                state.active_field == 0, true, y, field_width, &mut cursor_pos);
+        }
+
+        // URL field (editable in add, read-only in edit).
+        y += 1;
+        render_field(frame, "URL", &state.fields[1], state.cursors[1],
+            state.active_field == 1, is_add, y, field_width, &mut cursor_pos);
+
+        // Query field (always editable).
+        y += 1;
+        render_field(frame, "Query", &state.fields[2], state.cursors[2],
+            state.active_field == 2, true, y, field_width, &mut cursor_pos);
+
+        // Error message.
+        if let Some(err) = &state.error {
+            y += 2;
+            let err_area = ratatui::layout::Rect::new(label_x, y, inner.width.saturating_sub(4), 1);
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(err.as_str(), error_style))),
+                err_area,
+            );
+        }
+
+        // Set cursor position for the active field.
+        if let Some((cx, cy)) = cursor_pos {
+            frame.set_cursor_position((cx, cy));
+        }
     }
 }
 
@@ -887,6 +1010,15 @@ fn level_display(level: &str) -> String {
         other => other,
     };
     format!("{:<5}", display)
+}
+
+/// Return a centered `Rect` with a fixed height and percentage width.
+fn centered_rect_fixed(percent_x: u16, height: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let h = height.min(area.height);
+    let top = area.y + (area.height.saturating_sub(h)) / 2;
+    let w = (area.width as u32 * percent_x as u32 / 100) as u16;
+    let left = area.x + (area.width.saturating_sub(w)) / 2;
+    ratatui::layout::Rect::new(left, top, w, h)
 }
 
 /// Return a centered `Rect` carved out of `area`.
