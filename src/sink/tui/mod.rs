@@ -58,6 +58,21 @@ enum ScrollState {
     Selected(usize),
 }
 
+/// Which modal overlay is currently open (if any).
+enum OverlayMode {
+    None,
+    TreeSelect { cursor: usize },
+    SourceSelect { cursor: usize },
+}
+
+/// Per-source restart state for Loki sources.
+pub(crate) struct SourceRestart {
+    pub source_id: u16,
+    pub name: String,
+    pub tx: tokio::sync::watch::Sender<Option<LokiSourceParams>>,
+    pub query: String,
+}
+
 pub(crate) struct App {
     arena: Arc<Mutex<Arena>>,
 
@@ -94,8 +109,8 @@ pub(crate) struct App {
     /// Viewport height from the last render, used for page scroll calculations.
     viewport_height: usize,
 
-    /// Cursor position within the tree-select overlay (None = overlay closed).
-    tree_select_cursor: Option<usize>,
+    /// Currently open modal overlay.
+    overlay: OverlayMode,
 
     /// Current display mode (raw vs pretty).
     display_mode: DisplayMode,
@@ -116,25 +131,22 @@ pub(crate) struct App {
     /// do not shift the viewport.
     pretty_viewport_start: Option<usize>,
 
-    /// Current LogQL query string (for Loki sources).
-    loki_query: String,
-
     /// Text buffer for query editing input.
     query_input: String,
 
     /// Cursor position within query_input.
     query_cursor: usize,
 
-    /// Watch channel sender to signal Loki source restart. None for stdin.
-    source_restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
+    /// Per-source Loki restart state. Empty when no Loki sources exist.
+    loki_restarts: Vec<SourceRestart>,
+
+    /// Index into `loki_restarts` for the currently active query edit.
+    /// When there's exactly one Loki source, this is always 0.
+    active_loki_idx: usize,
 }
 
 impl App {
-    fn new(
-        arena: Arc<Mutex<Arena>>,
-        source_restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
-        initial_query: Option<String>,
-    ) -> Self {
+    fn new(arena: Arc<Mutex<Arena>>, loki_restarts: Vec<SourceRestart>) -> Self {
         Self {
             arena,
             view_path: Vec::new(),
@@ -148,16 +160,16 @@ impl App {
             should_quit: false,
             current_entry_count: 0,
             viewport_height: 0,
-            tree_select_cursor: None,
+            overlay: OverlayMode::None,
             display_mode: DisplayMode::Pretty,
             search: None,
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
             pretty_viewport_start: None,
-            loki_query: initial_query.unwrap_or_default(),
             query_input: String::new(),
             query_cursor: 0,
-            source_restart_tx,
+            loki_restarts,
+            active_loki_idx: 0,
         }
     }
 
@@ -171,8 +183,7 @@ impl App {
 /// Run the TUI event loop. This takes ownership of stdout for rendering.
 pub(crate) async fn run_tui(
     arena: Arc<Mutex<Arena>>,
-    restart_tx: Option<tokio::sync::watch::Sender<Option<LokiSourceParams>>>,
-    initial_query: Option<String>,
+    loki_restarts: Vec<SourceRestart>,
 ) -> Result<()> {
     // Setup terminal.
     enable_raw_mode()?;
@@ -181,7 +192,7 @@ pub(crate) async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = App::new(arena, restart_tx, initial_query);
+    let mut app = App::new(arena, loki_restarts);
     let mut event_stream = EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 

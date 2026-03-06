@@ -8,6 +8,9 @@ use tracing_subscriber::Layer;
 
 use crate::source::{RawLog, SourceMessage};
 
+/// Source ID reserved for internal tracing events.
+pub const INTERNAL_SOURCE_ID: u16 = u16::MAX;
+
 static INTERNAL_TX: OnceLock<mpsc::Sender<SourceMessage>> = OnceLock::new();
 
 /// Register the channel sender so internal tracing events appear as log entries.
@@ -74,6 +77,7 @@ impl<S: tracing::Subscriber> Layer<S> for InternalLogLayer {
             timestamp: jiff::Zoned::now(),
             message: json.to_string(),
             labels,
+            source_id: INTERNAL_SOURCE_ID,
         };
 
         let _ = tx.send(SourceMessage::Log(raw_log));

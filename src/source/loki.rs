@@ -62,7 +62,7 @@ fn parse_ns_timestamp(ns_str: &str) -> Result<jiff::Zoned> {
     Ok(ts.to_zoned(jiff::tz::TimeZone::UTC))
 }
 
-fn stream_to_raw_logs(stream: LokiStream) -> Vec<(i128, RawLog)> {
+fn stream_to_raw_logs(stream: LokiStream, source_id: u16) -> Vec<(i128, RawLog)> {
     let labels = stream.stream;
     stream
         .values
@@ -74,6 +74,7 @@ fn stream_to_raw_logs(stream: LokiStream) -> Vec<(i128, RawLog)> {
                 timestamp,
                 message: line,
                 labels: labels.clone(),
+                source_id,
             }))
         })
         .collect()
@@ -134,6 +135,7 @@ async fn fetch_all(
     start_ns: i128,
     end_ns: i128,
     tx: &mpsc::Sender<SourceMessage>,
+    source_id: u16,
 ) -> Result<i128> {
     let mut cursor = start_ns;
     let mut last_ts = start_ns;
@@ -145,7 +147,7 @@ async fn fetch_all(
         let mut batch_last_ts = cursor;
 
         for stream in streams {
-            let logs = stream_to_raw_logs(stream);
+            let logs = stream_to_raw_logs(stream, source_id);
             total_entries += logs.len();
             for (ns, raw_log) in logs {
                 if ns > batch_last_ts {
@@ -215,6 +217,7 @@ async fn tail_stream(
     query: &str,
     start_ns: i128,
     tx: &mpsc::Sender<SourceMessage>,
+    source_id: u16,
 ) -> Result<()> {
     let url = make_tail_url(base_url, query, start_ns)?;
 
@@ -251,7 +254,7 @@ async fn tail_stream(
         };
 
         for stream in tail_resp.streams {
-            let logs = stream_to_raw_logs(stream);
+            let logs = stream_to_raw_logs(stream, source_id);
             for (_ns, raw_log) in logs {
                 if tx.send(SourceMessage::Log(raw_log)).is_err() {
                     return Ok(());
@@ -273,6 +276,7 @@ pub async fn run_loki_source(
     initial_params: LokiSourceParams,
     tx: mpsc::Sender<SourceMessage>,
     mut restart_rx: tokio::sync::watch::Receiver<Option<LokiSourceParams>>,
+    source_id: u16,
 ) {
     let client = reqwest::Client::new();
     let mut params = initial_params;
@@ -289,7 +293,7 @@ pub async fn run_loki_source(
         );
 
         let last_ts = tokio::select! {
-            result = fetch_all(&client, &base_url, &params.query, params.start_ns, end_ns, &tx) => {
+            result = fetch_all(&client, &base_url, &params.query, params.start_ns, end_ns, &tx, source_id) => {
                 match result {
                     Ok(ts) => ts,
                     Err(e) => {
@@ -299,7 +303,7 @@ pub async fn run_loki_source(
                             return;
                         }
                         if let Some(new_params) = restart_rx.borrow_and_update().clone() {
-                            let _ = tx.send(SourceMessage::Reset);
+                            let _ = tx.send(SourceMessage::Reset { source_id });
                             params = new_params;
                         }
                         continue;
@@ -311,7 +315,7 @@ pub async fn run_loki_source(
                     return;
                 }
                 if let Some(new_params) = restart_rx.borrow_and_update().clone() {
-                    let _ = tx.send(SourceMessage::Reset);
+                    let _ = tx.send(SourceMessage::Reset { source_id });
                     params = new_params;
                 }
                 continue;
@@ -325,7 +329,7 @@ pub async fn run_loki_source(
                 return;
             }
             if let Some(new_params) = restart_rx.borrow_and_update().clone() {
-                let _ = tx.send(SourceMessage::Reset);
+                let _ = tx.send(SourceMessage::Reset { source_id });
                 params = new_params;
             }
             continue;
@@ -335,7 +339,7 @@ pub async fn run_loki_source(
         tracing::info!("Loki tail: query={:?} start={}", params.query, tail_start);
 
         tokio::select! {
-            result = tail_stream(&base_url, &params.query, tail_start, &tx) => {
+            result = tail_stream(&base_url, &params.query, tail_start, &tx, source_id) => {
                 match result {
                     Ok(()) => tracing::info!("WebSocket tail closed, reconnecting..."),
                     Err(e) => tracing::warn!("WebSocket tail error: {}, reconnecting...", e),
@@ -350,7 +354,7 @@ pub async fn run_loki_source(
                     return;
                 }
                 if let Some(new_params) = restart_rx.borrow_and_update().clone() {
-                    let _ = tx.send(SourceMessage::Reset);
+                    let _ = tx.send(SourceMessage::Reset { source_id });
                     params = new_params;
                 }
                 continue;

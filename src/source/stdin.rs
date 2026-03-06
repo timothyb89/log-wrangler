@@ -19,7 +19,7 @@ struct LogCliEntry {
 /// Each line is tried as logcli-format JSON (`{"labels":..., "line":..., "timestamp":...}`).
 /// Lines that fail to parse as JSON are treated as plain text with the current
 /// timestamp and no labels.
-pub fn read_stdin(tx: mpsc::Sender<SourceMessage>) {
+pub fn read_stdin(tx: mpsc::Sender<SourceMessage>, source_id: u16) {
     let stdin = std::io::stdin();
     let reader = stdin.lock();
 
@@ -45,12 +45,14 @@ pub fn read_stdin(tx: mpsc::Sender<SourceMessage>) {
                     timestamp,
                     message: entry.line,
                     labels: entry.labels,
+                    source_id,
                 }
             }
             Err(_) => RawLog {
                 timestamp: jiff::Zoned::now(),
                 message: line,
                 labels: HashMap::new(),
+                source_id,
             },
         };
 

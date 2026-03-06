@@ -11,7 +11,7 @@ use crate::filter::FilterMode;
 use crate::log::{Arena, LogView};
 
 use super::filter::entry_matches_filter;
-use super::{App, DisplayMode, FilterEntryMode, ScrollState, ToolbarMode};
+use super::{App, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, ToolbarMode};
 
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame) {
@@ -33,8 +33,14 @@ impl App {
         self.render_log_list(frame, chunks[0], &arena, view);
         self.render_toolbar(frame, chunks[1], &arena, view);
 
-        if self.tree_select_cursor.is_some() {
-            self.render_tree_select_overlay(frame, frame.area(), &arena);
+        match &self.overlay {
+            OverlayMode::TreeSelect { .. } => {
+                self.render_tree_select_overlay(frame, frame.area(), &arena);
+            }
+            OverlayMode::SourceSelect { .. } => {
+                self.render_source_select_overlay(frame, frame.area(), &arena);
+            }
+            OverlayMode::None => {}
         }
     }
 
@@ -94,11 +100,14 @@ impl App {
         }
 
         let preview = self.preview_filter();
+        let show_source = arena.source_names.len() > 1;
+        let src_w = if show_source { source_column_width(arena) } else { 0 };
 
         let rows: Vec<Row> = (start_idx..end_idx)
             .map(|view_idx| {
                 let arena_idx = entries[view_idx];
                 let resolved = arena.resolve_entry(arena_idx);
+                let entry = &arena.entries[arena_idx];
 
                 let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
 
@@ -108,7 +117,20 @@ impl App {
                     resolved.message.to_string()
                 };
 
-                let mut row = Row::new(vec![Cell::from(timestamp_str), Cell::from(message)]);
+                let mut cells = vec![Cell::from(timestamp_str)];
+                if show_source {
+                    let name = arena
+                        .source_names
+                        .get(entry.source_id as usize)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    cells.push(
+                        Cell::from(Span::styled(name.to_string(), source_style(entry.source_id))),
+                    );
+                }
+                cells.push(Cell::from(message));
+
+                let mut row = Row::new(cells);
 
                 let mut style = Style::default();
                 if let Some(ref filter) = self.search {
@@ -127,11 +149,21 @@ impl App {
             })
             .collect();
 
-        let widths = [Constraint::Length(15), Constraint::Min(1)];
+        let widths: Vec<Constraint> = if show_source {
+            vec![Constraint::Length(15), Constraint::Length(src_w), Constraint::Min(1)]
+        } else {
+            vec![Constraint::Length(15), Constraint::Min(1)]
+        };
+
+        let header_cells: Vec<&str> = if show_source {
+            vec!["Time", "Source", "Message"]
+        } else {
+            vec!["Time", "Message"]
+        };
 
         let table = Table::new(rows, widths)
             .header(
-                Row::new(vec!["Time", "Message"])
+                Row::new(header_cells)
                     .style(Style::default().bold().fg(Color::Cyan)),
             )
             .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
@@ -344,6 +376,8 @@ impl App {
 
         // Build rows from start_idx, accumulating heights until viewport full.
         let preview = self.preview_filter();
+        let show_source = arena.source_names.len() > 1;
+        let src_w = if show_source { source_column_width(arena) } else { 0 };
         self.visible_row_map.clear();
         self.log_list_body_y = area.y + 1; // +1 for header row
         let mut rows: Vec<Row> = Vec::new();
@@ -407,6 +441,18 @@ impl App {
                         }
                     })
                     .collect();
+                if show_source {
+                    let entry = &arena.entries[arena_idx];
+                    let src_name = arena
+                        .source_names
+                        .get(entry.source_id as usize)
+                        .map(|s| s.as_str())
+                        .unwrap_or("?");
+                    lines.push(Line::from(Span::styled(
+                        format!("  source: {}", src_name),
+                        source_style(entry.source_id),
+                    )));
+                }
                 for (k, v) in &all_labels {
                     lines.push(Line::from(Span::styled(
                         format!("  {}: {}", k, v),
@@ -457,8 +503,22 @@ impl App {
                 self.visible_row_map.push(view_idx);
             }
 
-            let mut row = Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
-                .height(row_height as u16);
+            let mut cells = vec![indicator, Cell::from(timestamp_str)];
+            if show_source {
+                let entry = &arena.entries[arena_idx];
+                let name = arena
+                    .source_names
+                    .get(entry.source_id as usize)
+                    .map(|s| s.as_str())
+                    .unwrap_or("?");
+                cells.push(
+                    Cell::from(Span::styled(name.to_string(), source_style(entry.source_id))),
+                );
+            }
+            cells.push(level_cell);
+            cells.push(content);
+
+            let mut row = Row::new(cells).height(row_height as u16);
 
             let mut style = Style::default();
             if let Some(ref filter) = self.search {
@@ -477,16 +537,32 @@ impl App {
             accumulated += row_height;
         }
 
-        let widths = [
-            Constraint::Length(1),  // indicator
-            Constraint::Length(15), // time
-            Constraint::Length(5),  // level
-            Constraint::Min(1),    // content
-        ];
+        let widths: Vec<Constraint> = if show_source {
+            vec![
+                Constraint::Length(1),     // indicator
+                Constraint::Length(15),    // time
+                Constraint::Length(src_w), // source
+                Constraint::Length(5),     // level
+                Constraint::Min(1),       // content
+            ]
+        } else {
+            vec![
+                Constraint::Length(1),  // indicator
+                Constraint::Length(15), // time
+                Constraint::Length(5),  // level
+                Constraint::Min(1),    // content
+            ]
+        };
+
+        let header_cells: Vec<&str> = if show_source {
+            vec![" ", "Time", "Source", "Level", "Message"]
+        } else {
+            vec![" ", "Time", "Level", "Message"]
+        };
 
         let table = Table::new(rows, widths)
             .header(
-                Row::new(vec![" ", "Time", "Level", "Message"])
+                Row::new(header_cells)
                     .style(Style::default().bold().fg(Color::Cyan)),
             )
             .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
@@ -538,13 +614,17 @@ impl App {
                     None => String::new(),
                 };
 
-                let has_loki = self.source_restart_tx.is_some();
-                let hints = match (self.search.is_some(), has_loki) {
-                    (true, true) => "q:quit /:filter ?:search n/N:match Esc:clear e:query v:view",
-                    (true, false) => "q:quit /:filter ?:search n/N:match Esc:clear v:view",
-                    (false, true) => "q:quit /:filter ?:search e:query v:view",
-                    (false, false) => "q:quit /:filter ?:search v:view",
-                };
+                let mut hints = String::from("q:quit /:filter ?:search");
+                if self.search.is_some() {
+                    hints.push_str(" n/N:match Esc:clear");
+                }
+                if !self.loki_restarts.is_empty() {
+                    hints.push_str(" e:query");
+                }
+                if arena.source_names.len() > 1 {
+                    hints.push_str(" s:sources");
+                }
+                hints.push_str(" v:view");
 
                 let status = format!(
                     " {} | {} | Filters: {} | View: {}/{} entries{} | {}",
@@ -665,14 +745,14 @@ impl App {
         area: ratatui::layout::Rect,
         arena: &Arena,
     ) {
-        let cursor = match self.tree_select_cursor {
-            Some(c) => c,
-            None => return,
+        let cursor = match &self.overlay {
+            OverlayMode::TreeSelect { cursor } => *cursor,
+            _ => return,
         };
 
         let mut flat: Vec<(super::ViewPath, String)> = Vec::new();
         let mut path: super::ViewPath = Vec::new();
-        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names);
 
         let popup_area = centered_rect(72, 65, area);
         frame.render_widget(Clear, popup_area);
@@ -704,6 +784,73 @@ impl App {
         list_state.select(Some(cursor));
         frame.render_stateful_widget(list, popup_area, &mut list_state);
     }
+
+    fn render_source_select_overlay(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+    ) {
+        let cursor = match &self.overlay {
+            OverlayMode::SourceSelect { cursor } => *cursor,
+            _ => return,
+        };
+
+        let view = arena.view_at(&self.view_path);
+
+        let popup_area = centered_rect(50, 50, area);
+        frame.render_widget(Clear, popup_area);
+
+        let items: Vec<ListItem> = arena
+            .source_names
+            .iter()
+            .enumerate()
+            .map(|(id, name)| {
+                let count = view.entries.iter().filter(|&&idx| arena.entries[idx].source_id == id as u16).count();
+                let label = format!("{name}  ({count} entries)");
+                ListItem::new(label).style(source_style(id as u16))
+            })
+            .collect();
+
+        let cursor = cursor.min(items.len().saturating_sub(1));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Sources ")
+                    .title_bottom(" ↑↓ / j k : navigate   Enter : filter   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol("> ");
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(cursor));
+        frame.render_stateful_widget(list, popup_area, &mut list_state);
+    }
+}
+
+const SOURCE_COLORS: &[Color] = &[
+    Color::Blue,
+    Color::Green,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Yellow,
+    Color::Red,
+];
+
+fn source_style(source_id: u16) -> Style {
+    Style::default().fg(SOURCE_COLORS[source_id as usize % SOURCE_COLORS.len()])
+}
+
+/// Max display width for the source column (capped at 12).
+fn source_column_width(arena: &Arena) -> u16 {
+    arena
+        .source_names
+        .iter()
+        .map(|n| n.len())
+        .max()
+        .unwrap_or(0)
+        .min(12) as u16
 }
 
 /// Compute the row height for an entry in pretty mode.
@@ -712,7 +859,8 @@ pub(super) fn pretty_row_height(arena: &Arena, arena_idx: usize, is_selected: bo
     let msg = resolved.inner_message.unwrap_or(resolved.message);
     let msg_lines = msg.lines().count().max(1);
     let label_lines = if is_selected {
-        resolved.labels.len() + resolved.structured_fields.len()
+        let source_line = if arena.source_names.len() > 1 { 1 } else { 0 };
+        source_line + resolved.labels.len() + resolved.structured_fields.len()
     } else {
         0
     };

@@ -17,6 +17,9 @@ pub(crate) struct LogEntry {
     pub timestamp: jiff::Zoned,
     pub message: Spur,
 
+    /// Which source produced this entry (index into Arena.source_names).
+    pub source_id: u16,
+
     /// The start index of labels for this log entry in the arena's global
     /// labels vec.
     pub labels_start: usize,
@@ -78,6 +81,9 @@ pub(crate) struct Arena {
 
     /// The root view.
     pub root_view: LogView,
+
+    /// Maps source_id -> display name.
+    pub source_names: Vec<String>,
 }
 
 /// A resolved log entry with strings ready for display.
@@ -109,6 +115,7 @@ impl Arena {
                 children: Vec::new(),
                 entries: Vec::new(),
             },
+            source_names: Vec::new(),
         }))
     }
 
@@ -128,6 +135,18 @@ impl Arena {
             children: Vec::new(),
             entries: Vec::new(),
         };
+    }
+
+    /// Remove all entries belonging to a specific source from every view.
+    /// Dead entries remain in the flat vecs as unreferenced garbage.
+    pub fn clear_source(&mut self, source_id: u16) {
+        fn clear_view(view: &mut LogView, entries: &[LogEntry], source_id: u16) {
+            view.entries.retain(|&idx| entries[idx].source_id != source_id);
+            for child in &mut view.children {
+                clear_view(child, entries, source_id);
+            }
+        }
+        clear_view(&mut self.root_view, &self.entries, source_id);
     }
 
     /// Navigate to a LogView by path.
@@ -231,6 +250,10 @@ impl LogView {
                         }
                     })
                 }
+                crate::filter::FilterTarget::Source(sid) => {
+                    let matches = entry.source_id == *sid;
+                    if filter.inverted { !matches } else { matches }
+                }
             };
 
             if !matches {
@@ -269,7 +292,7 @@ const NESTED_JSON_SKIP_FIELDS: &[&str] = &["level", "message", "msg", "timestamp
 
 pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>) {
     // TODO: hold received messages as PendingEntries for reordering
-    let mut rodeo = {
+    let rodeo = {
         let arena = arena.lock().unwrap();
         arena.rodeo.clone()
     };
@@ -278,12 +301,10 @@ pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>
     let mut sf_pairs: Vec<(Spur, Spur)> = Vec::new();
     for msg in rx.iter() {
         let incoming = match msg {
-            SourceMessage::Reset => {
+            SourceMessage::Reset { source_id } => {
                 let mut arena = arena.lock().unwrap();
-                arena.clear();
-                rodeo = arena.rodeo.clone();
-                label_pairs.clear();
-                sf_pairs.clear();
+                arena.clear_source(source_id);
+                // Do NOT replace rodeos — other sources' entries still reference them.
                 continue;
             }
             SourceMessage::Log(raw) => raw,
@@ -339,6 +360,7 @@ pub(crate) fn ingest(rx: mpsc::Receiver<SourceMessage>, arena: Arc<Mutex<Arena>>
         let entry = LogEntry {
             timestamp: incoming.timestamp,
             message,
+            source_id: incoming.source_id,
             labels_start: start,
             labels_length: count,
             level,

@@ -5,16 +5,25 @@ use color_eyre::Result;
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Args {
-    /// Log source URI.
+    /// Log source URI (repeatable). Format: [name=]uri
     ///
     /// stdin:// (default) reads JSONL from stdin.
     /// grafana+loki+http://host:port/api/datasources/proxy/uid/UID queries Loki via Grafana.
+    ///
+    /// Optional name prefix: --source "prod=grafana+loki+http://..."
     #[arg(long, default_value = "stdin://")]
-    pub source: String,
+    pub source: Vec<String>,
 
-    /// LogQL query (required for Loki sources).
+    /// LogQL query (repeatable). Format: [name=]<logql>
+    ///
+    /// A bare query (no name prefix) applies to all Loki sources that don't
+    /// have a named query. Named queries match the source name from --source.
+    ///
+    /// Examples:
+    ///   --query '{app="myapp"}'
+    ///   --query 'prod={app="myapp"}' --query 'staging={app="other"}'
     #[arg(long)]
-    pub query: Option<String>,
+    pub query: Vec<String>,
 
     /// Absolute start time (RFC 3339). Mutually exclusive with --since.
     #[arg(long, conflicts_with = "since")]

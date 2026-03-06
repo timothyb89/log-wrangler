@@ -37,6 +37,8 @@ pub(crate) enum FilterTarget {
     Label(Spur),
     /// Match against any field (message + all label values).
     Any,
+    /// Match entries from a specific source by ID.
+    Source(u16),
 }
 
 /// A single filter predicate.

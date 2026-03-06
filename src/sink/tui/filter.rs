@@ -11,7 +11,6 @@ impl App {
             return;
         }
 
-        self.loki_query = self.query_input.clone();
         self.toolbar_mode = ToolbarMode::Normal;
 
         // Reset view state.
@@ -20,21 +19,22 @@ impl App {
         self.h_scroll = 0;
         self.current_entry_count = 0;
         self.search = None;
-        self.tree_select_cursor = None;
+        self.overlay = super::OverlayMode::None;
 
-        // Signal the Loki source to restart with the new query.
-        if let Some(ref tx) = self.source_restart_tx {
+        // Signal the active Loki source to restart with the new query.
+        if let Some(restart) = self.loki_restarts.get_mut(self.active_loki_idx) {
+            restart.query = self.query_input.clone();
             let now = jiff::Zoned::now();
             let start = now
                 .checked_sub(jiff::SignedDuration::from_hours(1))
                 .unwrap_or(now.clone());
             let params = LokiSourceParams {
-                query: self.loki_query.clone(),
+                query: restart.query.clone(),
                 start_ns: start.timestamp().as_nanosecond(),
                 end_ns: None,
                 follow: true,
             };
-            let _ = tx.send(Some(params));
+            let _ = restart.tx.send(Some(params));
         }
 
         self.query_input.clear();
@@ -218,6 +218,43 @@ impl App {
         }
     }
 
+    /// Create a child LogView filtered to a specific source.
+    pub(super) fn apply_source_filter(&mut self, source_id: u16) {
+        let filter = Filter {
+            mode: FilterMode::substring(String::new()),
+            target: FilterTarget::Source(source_id),
+            inverted: false,
+        };
+
+        let Ok(mut arena) = self.arena.lock() else {
+            return;
+        };
+
+        let parent = arena.view_at(&self.view_path);
+        let mut child_entries = Vec::with_capacity(parent.entries.len());
+        for &arena_idx in &parent.entries {
+            if arena.entries[arena_idx].source_id == source_id {
+                child_entries.push(arena_idx);
+            }
+        }
+
+        let child = LogView {
+            filters: vec![filter],
+            children: Vec::new(),
+            entries: child_entries,
+        };
+
+        let parent_mut = arena.view_at_mut(&self.view_path);
+        let child_idx = parent_mut.children.len();
+        parent_mut.children.push(child);
+
+        let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+        self.view_path.push(child_idx);
+        self.h_scroll = 0;
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+        self.current_entry_count = arena.view_at(&self.view_path).entries.len();
+    }
+
     pub(super) fn pop_filter(&mut self) {
         if self.view_path.is_empty() {
             return;
@@ -331,6 +368,13 @@ pub(super) fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Fil
                 let (k, v) = &arena.labels[entry.labels_start + i];
                 k == key_spur && filter.raw_matches(rodeo.label_values.resolve(v))
             })
+        }
+        crate::filter::FilterTarget::Source(sid) => {
+            return if filter.inverted {
+                entry.source_id != *sid
+            } else {
+                entry.source_id == *sid
+            };
         }
     };
 

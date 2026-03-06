@@ -2,7 +2,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
-use super::{App, Direction, DisplayMode, FilterEntryMode, ScrollState, ToolbarMode};
+use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -11,9 +11,16 @@ impl App {
                 if key.kind != KeyEventKind::Press {
                     return;
                 }
-                if self.tree_select_cursor.is_some() {
-                    self.handle_tree_select_key(key.code, key.modifiers);
-                    return;
+                match &self.overlay {
+                    OverlayMode::TreeSelect { .. } => {
+                        self.handle_tree_select_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::SourceSelect { .. } => {
+                        self.handle_source_select_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::None => {}
                 }
                 match self.toolbar_mode {
                     ToolbarMode::Normal => self.handle_normal_key(key.code, key.modifiers),
@@ -32,7 +39,7 @@ impl App {
                 MouseEventKind::ScrollDown => self.scroll_down(),
                 MouseEventKind::ScrollUp => self.scroll_up(),
                 MouseEventKind::Down(MouseButton::Left) => {
-                    if self.tree_select_cursor.is_some() {
+                    if !matches!(self.overlay, OverlayMode::None) {
                         return;
                     }
                     if mouse.row >= self.log_list_body_y {
@@ -113,11 +120,17 @@ impl App {
                 };
             }
             (KeyCode::Char('e'), _) => {
-                if self.source_restart_tx.is_some() {
+                if !self.loki_restarts.is_empty() {
                     self.toolbar_mode = ToolbarMode::QueryEntry;
-                    self.query_input = self.loki_query.clone();
+                    let query = self.loki_restarts.get(self.active_loki_idx)
+                        .map(|r| r.query.clone())
+                        .unwrap_or_default();
+                    self.query_input = query;
                     self.query_cursor = self.query_input.len();
                 }
+            }
+            (KeyCode::Char('s'), _) => {
+                self.enter_source_select();
             }
             _ => {}
         }
