@@ -2,6 +2,7 @@
 name = "log-wrangler"
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/timothyb89/log-wrangler"
 
 [dependencies]
 chrono = "0.4.44"
@@ -23,3 +24,8 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = { version = "0.26", features = ["connect"] }
 url = "2"
 memchr = "2.8.0"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
