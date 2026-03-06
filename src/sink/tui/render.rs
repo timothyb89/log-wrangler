@@ -9,6 +9,7 @@ use ratatui::Frame;
 
 use crate::filter::FilterMode;
 use crate::log::{Arena, LogView};
+use crate::util::INTERNAL_SOURCE_ID;
 
 use super::filter::entry_matches_filter;
 use super::{App, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
@@ -140,11 +141,7 @@ impl App {
 
                 let mut cells = vec![Cell::from(timestamp_str)];
                 if show_source {
-                    let name = arena
-                        .source_names
-                        .get(entry.source_id as usize)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
+                    let name = resolve_source_name(arena, entry.source_id);
                     cells.push(
                         Cell::from(Span::styled(name.to_string(), source_style(entry.source_id))),
                     );
@@ -227,6 +224,29 @@ impl App {
             ScrollState::Selected(sel) => Some((*sel).min(total.saturating_sub(1))),
         };
 
+        let show_source = arena.source_names.len() > 1;
+        let src_w = if show_source { source_column_width(arena) } else { 0 };
+
+        // Content column width for label layout calculations.
+        // Columns: indicator(1) + gap(1) + time(15) + gap(1) + [source(src_w) + gap(1)] + level(5) + gap(1) + content
+        let content_width = area.width.saturating_sub(
+            1 + 1 + 15 + 1 + if show_source { src_w + 1 } else { 0 } + 5 + 1,
+        );
+
+        // Account for the table header row when computing available data rows.
+        let data_height = visible_height.saturating_sub(1);
+
+        // Cache selected entry height and clamp v_scroll.
+        if let Some(sel) = selected_view_idx {
+            let sel_h = pretty_row_height(arena, entries[sel], true, content_width);
+            let max_v = sel_h.saturating_sub(data_height);
+            self.v_scroll = self.v_scroll.min(max_v);
+            self.selected_entry_height = Some(sel_h);
+        } else {
+            self.v_scroll = 0;
+            self.selected_entry_height = None;
+        }
+
         // Compute start_idx.
         //
         // Tail mode: fill from the bottom (no persistent anchor).
@@ -242,8 +262,8 @@ impl App {
                 let mut acc = 0usize;
                 let mut start = total;
                 while start > 0 {
-                    let h = pretty_row_height(arena, entries[start - 1], false);
-                    if acc + h > visible_height {
+                    let h = pretty_row_height(arena, entries[start - 1], false, content_width);
+                    if acc + h > data_height {
                         break;
                     }
                     acc += h;
@@ -253,6 +273,15 @@ impl App {
             }
             ScrollState::Selected(sel) => {
                 let sel = (*sel).min(total.saturating_sub(1));
+                let sel_h = pretty_row_height(arena, entries[sel], true, content_width);
+
+                // If the entry fills or exceeds the data area (viewport minus
+                // header row), it gets the whole screen and we scroll within
+                // it via v_scroll.
+                if sel_h >= data_height {
+                    self.pretty_viewport_start = Some(sel);
+                    sel
+                } else {
 
                 // Place sel near the top of the viewport with SCROLL_PAD
                 // lines of context above it.
@@ -260,7 +289,7 @@ impl App {
                     let mut s = sel;
                     let mut pad = 0;
                     while s > 0 && pad < SCROLL_PAD {
-                        pad += pretty_row_height(arena, entries[s - 1], false);
+                        pad += pretty_row_height(arena, entries[s - 1], false, content_width);
                         s -= 1;
                     }
                     s
@@ -269,15 +298,15 @@ impl App {
                 // Place sel near the bottom of the viewport with SCROLL_PAD
                 // lines of context below it.
                 let pad_to_bottom = |sel: usize| -> usize {
-                    let sel_h = pretty_row_height(arena, entries[sel], true);
+                    let sel_h = pretty_row_height(arena, entries[sel], true, content_width);
                     let mut pad_below = 0;
                     let mut pi = sel + 1;
                     while pi < total && pad_below < SCROLL_PAD {
                         pad_below +=
-                            pretty_row_height(arena, entries[pi], false);
+                            pretty_row_height(arena, entries[pi], false, content_width);
                         pi += 1;
                     }
-                    let space_above = visible_height
+                    let space_above = data_height
                         .saturating_sub(sel_h)
                         .saturating_sub(pad_below);
                     let mut s = sel;
@@ -287,6 +316,7 @@ impl App {
                             arena,
                             entries[s - 1],
                             false,
+                            content_width,
                         );
                         if acc + h > space_above {
                             break;
@@ -309,13 +339,13 @@ impl App {
                         let mut sel_screen_top: Option<usize> = None;
                         for i in prev..total {
                             let h =
-                                pretty_row_height(arena, entries[i], i == sel);
+                                pretty_row_height(arena, entries[i], i == sel, content_width);
                             if i == sel {
                                 sel_screen_top = Some(acc);
                                 break;
                             }
                             acc += h;
-                            if acc >= visible_height {
+                            if acc >= data_height {
                                 break;
                             }
                         }
@@ -326,42 +356,12 @@ impl App {
                                 pad_to_bottom(sel)
                             }
                             Some(top) => {
-                                let sel_h = pretty_row_height(
-                                    arena,
-                                    entries[sel],
-                                    true,
-                                );
                                 let bottom = top + sel_h;
-
-                                // Padding margins (only where more entries
-                                // exist in that direction).
-                                let top_margin =
-                                    if sel > 0 { SCROLL_PAD } else { 0 };
-                                let bottom_margin =
-                                    if sel + 1 < total { SCROLL_PAD } else { 0 };
-
-                                if top_margin + sel_h + bottom_margin
-                                    > visible_height
-                                {
-                                    // Viewport too small for padding – just
-                                    // ensure basic visibility.
-                                    if bottom <= visible_height {
-                                        prev
-                                    } else {
-                                        pad_to_bottom(sel)
-                                    }
-                                } else if top < top_margin {
-                                    // sel encroaches on top margin – scroll up.
-                                    pad_to_top(sel)
-                                } else if bottom
-                                    > visible_height.saturating_sub(bottom_margin)
-                                {
-                                    // sel encroaches on bottom margin – scroll
-                                    // down.
+                                if bottom > data_height {
+                                    // Entry extends past viewport – shift.
                                     pad_to_bottom(sel)
                                 } else {
-                                    // sel is comfortably within the padded
-                                    // region – keep viewport stable.
+                                    // Entry is fully visible – keep stable.
                                     prev
                                 }
                             }
@@ -375,8 +375,8 @@ impl App {
                     while bottom_start > 0 {
                         let idx = bottom_start - 1;
                         let h =
-                            pretty_row_height(arena, entries[idx], idx == sel);
-                        if acc + h > visible_height {
+                            pretty_row_height(arena, entries[idx], idx == sel, content_width);
+                        if acc + h > data_height {
                             break;
                         }
                         acc += h;
@@ -392,13 +392,13 @@ impl App {
 
                 self.pretty_viewport_start = Some(start);
                 start
+
+                } // end else (entry fits in viewport)
             }
         };
 
         // Build rows from start_idx, accumulating heights until viewport full.
         let preview = self.preview_filter();
-        let show_source = arena.source_names.len() > 1;
-        let src_w = if show_source { source_column_width(arena) } else { 0 };
         self.visible_row_map.clear();
         self.log_list_body_y = area.y + 1; // +1 for header row
         let mut rows: Vec<Row> = Vec::new();
@@ -406,7 +406,7 @@ impl App {
         let mut table_select_idx: Option<usize> = None;
 
         for view_idx in start_idx..total {
-            if accumulated >= visible_height {
+            if accumulated >= data_height {
                 break;
             }
 
@@ -418,38 +418,23 @@ impl App {
             let msg_lines: Vec<&str> = display_msg.lines().collect();
             let msg_line_count = msg_lines.len().max(1);
 
-            // Merge logcli labels + structured fields for display.
-            let all_labels: Vec<(&str, &str)> = resolved
+            // Merge logcli labels + structured fields for display, sorted by key.
+            let mut all_labels: Vec<(&str, &str)> = resolved
                 .labels
                 .iter()
                 .chain(resolved.structured_fields.iter())
                 .copied()
                 .collect();
+            all_labels.sort_by_key(|(k, _)| *k);
 
-            let label_lines = if is_selected { all_labels.len() } else { 0 };
-            let row_height = msg_line_count + label_lines;
-
-            // Indicator column: mark multi-line entries.
-            let indicator = if row_height > 1 {
-                let lines: Vec<Line> = (0..row_height).map(|_| Line::from("│")).collect();
-                Cell::from(Text::from(lines))
-            } else {
-                Cell::from(" ")
-            };
-
-            // Timestamp.
-            let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
-
-            // Level with semantic color.
-            let level_cell = if let Some(lvl) = resolved.level {
-                Cell::from(Span::styled(level_display(lvl), level_style(lvl)))
-            } else {
-                Cell::from("")
-            };
+            let layout = label_layout(&all_labels, content_width);
+            let source_line = if is_selected && show_source { 1 } else { 0 };
+            let label_rows = if is_selected { layout.num_rows } else { 0 };
+            let full_row_height = msg_line_count + source_line + label_rows;
 
             // Content column.
-            let content = if is_selected {
-                // Expanded: message lines + one line per label.
+            let (content, rendered_height) = if is_selected {
+                // Expanded: message lines + source + label rows.
                 let mut lines: Vec<Line> = msg_lines
                     .iter()
                     .enumerate()
@@ -464,23 +449,88 @@ impl App {
                     .collect();
                 if show_source {
                     let entry = &arena.entries[arena_idx];
-                    let src_name = arena
-                        .source_names
-                        .get(entry.source_id as usize)
-                        .map(|s| s.as_str())
-                        .unwrap_or("?");
+                    let src_name = resolve_source_name(arena, entry.source_id);
                     lines.push(Line::from(Span::styled(
                         format!("  source: {}", src_name),
                         source_style(entry.source_id),
                     )));
                 }
-                for (k, v) in &all_labels {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}: {}", k, v),
-                        Style::default().fg(Color::DarkGray),
-                    )));
+
+                // Render labels with alignment and optional two-column layout.
+                let key_style = Style::default().fg(Color::DarkGray);
+                let sep_style = Style::default().fg(Color::DarkGray);
+                let val_style = Style::default().fg(Color::Gray);
+                let key_col = 2 + layout.max_key_len + 3; // "  key_padded : "
+
+                if layout.two_columns {
+                    let half = (all_labels.len() + 1) / 2;
+                    let cw = content_width as usize;
+                    let gap = 3usize;
+
+                    // Size left value column to fit actual content, but cap so
+                    // the right column has at least key_col + 8 chars.
+                    let max_left_val = all_labels[..half].iter()
+                        .map(|(_, v)| v.len()).max().unwrap_or(0);
+                    let right_min = key_col + 8;
+                    let left_val_cap = max_left_val
+                        .min(cw.saturating_sub(key_col + gap + right_min));
+                    let right_col_offset = key_col + left_val_cap + gap;
+
+                    for row_idx in 0..layout.num_rows {
+                        let mut spans: Vec<Span> = Vec::new();
+
+                        let (k, v) = all_labels[row_idx];
+                        spans.push(Span::styled(
+                            format!("  {:<width$}", k, width = layout.max_key_len),
+                            key_style,
+                        ));
+                        spans.push(Span::styled(" : ", sep_style));
+                        let truncated: String = v.chars().take(left_val_cap).collect();
+                        let display_len = truncated.len();
+                        spans.push(Span::styled(truncated, val_style));
+
+                        let right_idx = half + row_idx;
+                        if right_idx < all_labels.len() {
+                            let left_used = key_col + display_len;
+                            let pad = right_col_offset.saturating_sub(left_used);
+                            spans.push(Span::raw(" ".repeat(pad)));
+
+                            let (rk, rv) = all_labels[right_idx];
+                            spans.push(Span::styled(
+                                format!("{:<width$}", rk, width = layout.max_key_len),
+                                key_style,
+                            ));
+                            spans.push(Span::styled(" : ", sep_style));
+                            spans.push(Span::styled(rv.to_string(), val_style));
+                        }
+
+                        lines.push(Line::from(spans));
+                    }
+                } else {
+                    for (k, v) in &all_labels {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  {:<width$}", k, width = layout.max_key_len),
+                                key_style,
+                            ),
+                            Span::styled(" : ", sep_style),
+                            Span::styled(v.to_string(), val_style),
+                        ]));
+                    }
                 }
-                Cell::from(Text::from(lines))
+
+                // Apply intra-entry scrolling for tall entries.
+                // Window tall entries to data_height (visible_height minus
+                // header row) so the row fits in the table's data area.
+                if lines.len() > data_height {
+                    let v = self.v_scroll.min(lines.len().saturating_sub(data_height));
+                    let window_end = (v + data_height).min(lines.len());
+                    let windowed: Vec<Line> = lines[v..window_end].to_vec();
+                    let h = windowed.len();
+                    (Cell::from(Text::from(windowed)), h)
+                } else {
+                    (Cell::from(Text::from(lines)), full_row_height)
+                }
             } else if msg_line_count > 1 {
                 // Multi-line message (not selected): show all lines, abridged labels on first.
                 let mut lines: Vec<Line> = Vec::with_capacity(msg_line_count);
@@ -498,10 +548,10 @@ impl App {
                         lines.push(Line::from(l.to_string()));
                     }
                 }
-                Cell::from(Text::from(lines))
+                (Cell::from(Text::from(lines)), msg_line_count)
             } else {
                 // Single-line: message + inline abridged labels.
-                if all_labels.is_empty() {
+                let cell = if all_labels.is_empty() {
                     Cell::from(display_msg)
                 } else {
                     let mut label_suffix = String::new();
@@ -512,7 +562,47 @@ impl App {
                         Span::raw(display_msg.to_string()),
                         Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
                     ]))
+                };
+                (cell, 1)
+            };
+
+            // Indicator column: mark multi-line entries with scroll hints.
+            let is_windowed = is_selected && rendered_height < full_row_height;
+            let indicator = if is_windowed {
+                // Tall entry with intra-scroll: show ▲/▼ hints.
+                let arrow_style = Style::default().fg(Color::Yellow);
+                let mut ind_lines: Vec<Line> = Vec::with_capacity(rendered_height);
+                if self.v_scroll > 0 {
+                    ind_lines.push(Line::from(Span::styled("▲", arrow_style)));
+                } else {
+                    ind_lines.push(Line::from("│"));
                 }
+                for _ in 1..rendered_height.saturating_sub(1) {
+                    ind_lines.push(Line::from("│"));
+                }
+                if rendered_height > 1 {
+                    if self.v_scroll + data_height < full_row_height {
+                        ind_lines.push(Line::from(Span::styled("▼", arrow_style)));
+                    } else {
+                        ind_lines.push(Line::from("│"));
+                    }
+                }
+                Cell::from(Text::from(ind_lines))
+            } else if rendered_height > 1 {
+                let lines: Vec<Line> = (0..rendered_height).map(|_| Line::from("│")).collect();
+                Cell::from(Text::from(lines))
+            } else {
+                Cell::from(" ")
+            };
+
+            // Timestamp.
+            let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
+
+            // Level with semantic color.
+            let level_cell = if let Some(lvl) = resolved.level {
+                Cell::from(Span::styled(level_display(lvl), level_style(lvl)))
+            } else {
+                Cell::from("")
             };
 
             if is_selected {
@@ -520,18 +610,14 @@ impl App {
             }
 
             // Extend row map: each screen row within this entry maps to view_idx.
-            for _ in 0..row_height {
+            for _ in 0..rendered_height {
                 self.visible_row_map.push(view_idx);
             }
 
             let mut cells = vec![indicator, Cell::from(timestamp_str)];
             if show_source {
                 let entry = &arena.entries[arena_idx];
-                let name = arena
-                    .source_names
-                    .get(entry.source_id as usize)
-                    .map(|s| s.as_str())
-                    .unwrap_or("?");
+                let name = resolve_source_name(arena, entry.source_id);
                 cells.push(
                     Cell::from(Span::styled(name.to_string(), source_style(entry.source_id))),
                 );
@@ -539,7 +625,7 @@ impl App {
             cells.push(level_cell);
             cells.push(content);
 
-            let mut row = Row::new(cells).height(row_height as u16);
+            let mut row = Row::new(cells).height(rendered_height as u16);
 
             let mut style = Style::default();
             if let Some(ref filter) = self.search {
@@ -555,7 +641,7 @@ impl App {
             row = row.style(style);
 
             rows.push(row);
-            accumulated += row_height;
+            accumulated += rendered_height;
         }
 
         let widths: Vec<Constraint> = if show_source {
@@ -614,8 +700,18 @@ impl App {
                 let entry_count = view.entries.len();
                 let total_count = arena.entries.len();
                 let mode_indicator = match self.scroll {
-                    ScrollState::Tail => "TAIL",
-                    ScrollState::Selected(_) => "SCROLL",
+                    ScrollState::Tail => "TAIL".to_string(),
+                    ScrollState::Selected(_) => {
+                        if let Some(h) = self.selected_entry_height {
+                            if h > self.viewport_height {
+                                format!("SCROLL [{}/{}]", self.v_scroll + 1, h)
+                            } else {
+                                "SCROLL".to_string()
+                            }
+                        } else {
+                            "SCROLL".to_string()
+                        }
+                    }
                 };
 
                 let display_label = match self.display_mode {
@@ -965,6 +1061,17 @@ impl App {
     }
 }
 
+fn resolve_source_name(arena: &Arena, source_id: u16) -> &str {
+    if source_id == INTERNAL_SOURCE_ID {
+        return "internal";
+    }
+    arena
+        .source_names
+        .get(source_id as usize)
+        .map(|s| s.as_str())
+        .unwrap_or("?")
+}
+
 const SOURCE_COLORS: &[Color] = &[
     Color::Blue,
     Color::Green,
@@ -989,18 +1096,57 @@ fn source_column_width(arena: &Arena) -> u16 {
         .min(12) as u16
 }
 
+struct LabelLayout {
+    num_rows: usize,
+    max_key_len: usize,
+    two_columns: bool,
+}
+
+/// Determine the number of display rows and column layout for a set of labels.
+fn label_layout(labels: &[(&str, &str)], content_width: u16) -> LabelLayout {
+    if labels.is_empty() {
+        return LabelLayout { num_rows: 0, max_key_len: 0, two_columns: false };
+    }
+
+    let max_key_len = labels.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+    let num_labels = labels.len();
+
+    // Each column needs: indent(2) + key + separator(" : ", 3) + min_value(8).
+    let min_col_width = 2 + max_key_len + 3 + 8;
+    let two_columns = num_labels >= 4
+        && (content_width as usize) >= 2 * min_col_width + 2;
+
+    let num_rows = if two_columns {
+        (num_labels + 1) / 2
+    } else {
+        num_labels
+    };
+
+    LabelLayout { num_rows, max_key_len, two_columns }
+}
+
 /// Compute the row height for an entry in pretty mode.
-pub(super) fn pretty_row_height(arena: &Arena, arena_idx: usize, is_selected: bool) -> usize {
+pub(super) fn pretty_row_height(
+    arena: &Arena,
+    arena_idx: usize,
+    is_selected: bool,
+    content_width: u16,
+) -> usize {
     let resolved = arena.resolve_entry(arena_idx);
     let msg = resolved.inner_message.unwrap_or(resolved.message);
     let msg_lines = msg.lines().count().max(1);
-    let label_lines = if is_selected {
-        let source_line = if arena.source_names.len() > 1 { 1 } else { 0 };
-        source_line + resolved.labels.len() + resolved.structured_fields.len()
-    } else {
-        0
-    };
-    msg_lines + label_lines
+    if !is_selected {
+        return msg_lines;
+    }
+    let all_labels: Vec<(&str, &str)> = resolved
+        .labels
+        .iter()
+        .chain(resolved.structured_fields.iter())
+        .copied()
+        .collect();
+    let source_line = if arena.source_names.len() > 1 { 1 } else { 0 };
+    let layout = label_layout(&all_labels, content_width);
+    msg_lines + source_line + layout.num_rows
 }
 
 fn level_style(level: &str) -> Style {

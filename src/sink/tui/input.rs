@@ -50,6 +50,7 @@ impl App {
                         if let Some(&view_idx) = self.visible_row_map.get(offset) {
                             self.scroll = ScrollState::Selected(view_idx);
                             self.h_scroll = 0;
+                            self.v_scroll = 0;
                         }
                     }
                 }
@@ -75,11 +76,13 @@ impl App {
             (KeyCode::Char('G') | KeyCode::End, _) => {
                 self.scroll = ScrollState::Tail;
                 self.h_scroll = 0;
+                self.v_scroll = 0;
             }
             (KeyCode::Char('g') | KeyCode::Home, _) => {
                 if self.current_entry_count > 0 {
                     self.scroll = ScrollState::Selected(0);
                     self.h_scroll = 0;
+                    self.v_scroll = 0;
                 }
             }
             (KeyCode::Right | KeyCode::Char('l'), _) => {
@@ -340,6 +343,20 @@ impl App {
         match &self.scroll {
             ScrollState::Tail => {}
             ScrollState::Selected(idx) => {
+                // In pretty mode, scroll within a tall entry before moving on.
+                if self.display_mode == DisplayMode::Pretty {
+                    if let Some(entry_height) = self.selected_entry_height {
+                        let data_height = self.viewport_height.saturating_sub(1);
+                        if entry_height > data_height {
+                            let max_v = entry_height.saturating_sub(data_height);
+                            if self.v_scroll < max_v {
+                                self.v_scroll += 1;
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 let next = idx + 1;
                 if next >= self.current_entry_count {
                     self.scroll = ScrollState::Tail;
@@ -347,6 +364,7 @@ impl App {
                     self.scroll = ScrollState::Selected(next);
                 }
                 self.h_scroll = 0;
+                self.v_scroll = 0;
             }
         }
     }
@@ -357,12 +375,22 @@ impl App {
                 if self.current_entry_count > 0 {
                     self.scroll = ScrollState::Selected(self.current_entry_count - 1);
                     self.h_scroll = 0;
+                    // Enter at bottom of entry; clamped during render.
+                    self.v_scroll = usize::MAX;
                 }
             }
             ScrollState::Selected(idx) => {
+                // In pretty mode, scroll within a tall entry before moving on.
+                if self.display_mode == DisplayMode::Pretty && self.v_scroll > 0 {
+                    self.v_scroll -= 1;
+                    return;
+                }
+
                 if *idx > 0 {
                     self.scroll = ScrollState::Selected(idx - 1);
                     self.h_scroll = 0;
+                    // Enter at bottom of previous entry; clamped during render.
+                    self.v_scroll = usize::MAX;
                 }
             }
         }
@@ -373,6 +401,20 @@ impl App {
         match &self.scroll {
             ScrollState::Tail => {}
             ScrollState::Selected(idx) => {
+                // In pretty mode, page within a tall entry first.
+                if self.display_mode == DisplayMode::Pretty {
+                    if let Some(entry_height) = self.selected_entry_height {
+                        let data_height = self.viewport_height.saturating_sub(1);
+                        if entry_height > data_height {
+                            let max_v = entry_height.saturating_sub(data_height);
+                            if self.v_scroll < max_v {
+                                self.v_scroll = (self.v_scroll + page).min(max_v);
+                                return;
+                            }
+                        }
+                    }
+                }
+
                 let next = idx + page;
                 if next >= self.current_entry_count {
                     self.scroll = ScrollState::Tail;
@@ -380,6 +422,7 @@ impl App {
                     self.scroll = ScrollState::Selected(next);
                 }
                 self.h_scroll = 0;
+                self.v_scroll = 0;
             }
         }
     }
@@ -392,11 +435,20 @@ impl App {
                     let target = self.current_entry_count.saturating_sub(page);
                     self.scroll = ScrollState::Selected(target);
                     self.h_scroll = 0;
+                    self.v_scroll = 0;
                 }
             }
             ScrollState::Selected(idx) => {
+                // In pretty mode, page within a tall entry first.
+                if self.display_mode == DisplayMode::Pretty && self.v_scroll > 0 {
+                    self.v_scroll = self.v_scroll.saturating_sub(page);
+                    return;
+                }
+
                 self.scroll = ScrollState::Selected(idx.saturating_sub(page));
                 self.h_scroll = 0;
+                // Enter at bottom of target entry; clamped during render.
+                self.v_scroll = usize::MAX;
             }
         }
     }
@@ -413,6 +465,7 @@ impl App {
                     self.scroll = ScrollState::Selected(next);
                 }
                 self.h_scroll = 0;
+                self.v_scroll = 0;
             }
         }
     }
@@ -425,11 +478,13 @@ impl App {
                     let target = self.current_entry_count.saturating_sub(jump);
                     self.scroll = ScrollState::Selected(target);
                     self.h_scroll = 0;
+                    self.v_scroll = 0;
                 }
             }
             ScrollState::Selected(idx) => {
                 self.scroll = ScrollState::Selected(idx.saturating_sub(jump));
                 self.h_scroll = 0;
+                self.v_scroll = 0;
             }
         }
     }

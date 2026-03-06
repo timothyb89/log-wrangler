@@ -116,6 +116,16 @@ pub(crate) struct App {
     /// Horizontal scroll offset for the currently selected entry's message.
     h_scroll: usize,
 
+    /// Vertical line offset within the currently selected entry in pretty mode.
+    /// When a selected entry is taller than the viewport, this tracks how far
+    /// down within that entry the user has scrolled. Reset to 0 when moving
+    /// to a different entry.
+    v_scroll: usize,
+
+    /// Cached total height (in lines) of the currently selected entry in
+    /// pretty mode. Set during render, read during input handling.
+    selected_entry_height: Option<usize>,
+
     /// Current toolbar mode.
     toolbar_mode: ToolbarMode,
 
@@ -187,6 +197,8 @@ impl App {
             view_path: Vec::new(),
             scroll: ScrollState::Tail,
             h_scroll: 0,
+            v_scroll: 0,
+            selected_entry_height: None,
             toolbar_mode: ToolbarMode::Normal,
             filter_entry_mode: FilterEntryMode::Substring,
             filter_input: String::new(),

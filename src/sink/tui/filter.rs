@@ -85,6 +85,7 @@ impl App {
                 self.view_path.clear();
                 self.scroll = ScrollState::Tail;
                 self.h_scroll = 0;
+                self.v_scroll = 0;
                 self.current_entry_count = 0;
                 self.search = None;
             }
@@ -180,6 +181,7 @@ impl App {
         let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
         self.view_path.push(child_idx);
         self.h_scroll = 0;
+        self.v_scroll = 0;
         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
 
@@ -243,6 +245,7 @@ impl App {
                     if entry_matches_filter(&arena, arena_idx, filter) {
                         self.scroll = ScrollState::Selected(candidate);
                         self.h_scroll = 0;
+                        self.v_scroll = 0;
                         return;
                     }
                 }
@@ -254,6 +257,7 @@ impl App {
                     if entry_matches_filter(&arena, arena_idx, filter) {
                         self.scroll = ScrollState::Selected(candidate);
                         self.h_scroll = 0;
+                        self.v_scroll = 0;
                         return;
                     }
                 }
@@ -340,6 +344,7 @@ impl App {
         let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
         self.view_path.push(child_idx);
         self.h_scroll = 0;
+        self.v_scroll = 0;
         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
     }
@@ -353,6 +358,7 @@ impl App {
         drop(arena);
         self.view_path.pop();
         self.h_scroll = 0;
+        self.v_scroll = 0;
         let Ok(arena) = self.arena.lock() else {
             self.scroll = ScrollState::Tail;
             return;
@@ -378,6 +384,7 @@ impl App {
 
         let child_idx = self.view_path.pop().unwrap();
         self.h_scroll = 0;
+        self.v_scroll = 0;
 
         // Remove the child branch.
         {
@@ -421,6 +428,7 @@ impl App {
         let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
         *self.view_path.last_mut().unwrap() = new_idx;
         self.h_scroll = 0;
+        self.v_scroll = 0;
         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
     }
 }

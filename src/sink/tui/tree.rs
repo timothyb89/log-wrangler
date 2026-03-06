@@ -46,6 +46,7 @@ impl App {
                         let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
                         self.view_path = selected_path.clone();
                         self.h_scroll = 0;
+                        self.v_scroll = 0;
                         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
                     }
                     self.current_entry_count =
