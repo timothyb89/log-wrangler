@@ -1,0 +1,758 @@
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{
+    Block, Borders, Cell, Clear, List, ListItem, ListState, Paragraph, Row, Scrollbar,
+    ScrollbarOrientation, ScrollbarState, Table, TableState,
+};
+use ratatui::Frame;
+
+use crate::filter::FilterMode;
+use crate::log::{Arena, LogView};
+
+use super::filter::entry_matches_filter;
+use super::{App, DisplayMode, FilterEntryMode, ScrollState, ToolbarMode};
+
+impl App {
+    pub(super) fn render(&mut self, frame: &mut Frame) {
+        let arena_ref = self.arena.clone();
+        let Ok(arena) = arena_ref.lock() else {
+            return;
+        };
+
+        let view = arena.view_at(&self.view_path);
+        self.current_entry_count = view.entries.len();
+
+        let chunks = Layout::vertical([
+            Constraint::Min(1),    // log list
+            Constraint::Length(1), // toolbar
+        ])
+        .split(frame.area());
+
+        self.viewport_height = chunks[0].height as usize;
+        self.render_log_list(frame, chunks[0], &arena, view);
+        self.render_toolbar(frame, chunks[1], &arena, view);
+
+        if self.tree_select_cursor.is_some() {
+            self.render_tree_select_overlay(frame, frame.area(), &arena);
+        }
+    }
+
+    fn render_log_list(
+        &mut self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
+        match self.display_mode {
+            DisplayMode::Raw => self.render_log_list_raw(frame, area, arena, view),
+            DisplayMode::Pretty => self.render_log_list_pretty(frame, area, arena, view),
+        }
+    }
+
+    fn render_log_list_raw(
+        &mut self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
+        let visible_height = area.height as usize;
+        let entries = &view.entries;
+        let total = entries.len();
+
+        if total == 0 {
+            let empty = Paragraph::new("No log entries")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        let (start_idx, selected_view_idx) = match &self.scroll {
+            ScrollState::Tail => {
+                let start = total.saturating_sub(visible_height);
+                (start, None)
+            }
+            ScrollState::Selected(sel) => {
+                let sel = (*sel).min(total.saturating_sub(1));
+                let half = visible_height / 2;
+                let start = sel
+                    .saturating_sub(half)
+                    .min(total.saturating_sub(visible_height));
+                (start, Some(sel))
+            }
+        };
+
+        let end_idx = (start_idx + visible_height).min(total);
+
+        // Populate row map for mouse click support (all rows height 1 in raw mode).
+        self.visible_row_map.clear();
+        self.log_list_body_y = area.y + 1; // +1 for header row
+        for view_idx in start_idx..end_idx {
+            self.visible_row_map.push(view_idx);
+        }
+
+        let preview = self.preview_filter();
+
+        let rows: Vec<Row> = (start_idx..end_idx)
+            .map(|view_idx| {
+                let arena_idx = entries[view_idx];
+                let resolved = arena.resolve_entry(arena_idx);
+
+                let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
+
+                let message = if Some(view_idx) == selected_view_idx {
+                    resolved.message.chars().skip(self.h_scroll).collect()
+                } else {
+                    resolved.message.to_string()
+                };
+
+                let mut row = Row::new(vec![Cell::from(timestamp_str), Cell::from(message)]);
+
+                let mut style = Style::default();
+                if let Some(ref filter) = self.search {
+                    if entry_matches_filter(arena, arena_idx, filter) {
+                        style = style.fg(Color::Yellow).bold();
+                    }
+                }
+                if let Some(ref pf) = preview {
+                    if entry_matches_filter(arena, arena_idx, pf) {
+                        style = style.bold();
+                    }
+                }
+                row = row.style(style);
+
+                row
+            })
+            .collect();
+
+        let widths = [Constraint::Length(15), Constraint::Min(1)];
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec!["Time", "Message"])
+                    .style(Style::default().bold().fg(Color::Cyan)),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+
+        let mut table_state = TableState::default();
+        if let Some(sel) = selected_view_idx {
+            table_state.select(Some(sel - start_idx));
+        }
+
+        frame.render_stateful_widget(table, area, &mut table_state);
+
+        // Scrollbar overlay.
+        let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+
+    fn render_log_list_pretty(
+        &mut self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
+        let visible_height = area.height as usize;
+        let entries = &view.entries;
+        let total = entries.len();
+
+        if total == 0 {
+            let empty = Paragraph::new("No log entries")
+                .style(Style::default().fg(Color::DarkGray));
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        let selected_view_idx = match &self.scroll {
+            ScrollState::Tail => None,
+            ScrollState::Selected(sel) => Some((*sel).min(total.saturating_sub(1))),
+        };
+
+        // Compute start_idx.
+        //
+        // Tail mode: fill from the bottom (no persistent anchor).
+        // Selected mode: reuse the persisted viewport start when the selection
+        // is still visible; only scroll when the selection leaves the viewport.
+        // A small padding (SCROLL_PAD screen-lines) is added when the viewport
+        // *does* shift so the user sees context in the scroll direction.
+        const SCROLL_PAD: usize = 2;
+
+        let start_idx = match &self.scroll {
+            ScrollState::Tail => {
+                self.pretty_viewport_start = None;
+                let mut acc = 0usize;
+                let mut start = total;
+                while start > 0 {
+                    let h = pretty_row_height(arena, entries[start - 1], false);
+                    if acc + h > visible_height {
+                        break;
+                    }
+                    acc += h;
+                    start -= 1;
+                }
+                start
+            }
+            ScrollState::Selected(sel) => {
+                let sel = (*sel).min(total.saturating_sub(1));
+
+                // Place sel near the top of the viewport with SCROLL_PAD
+                // lines of context above it.
+                let pad_to_top = |sel: usize| -> usize {
+                    let mut s = sel;
+                    let mut pad = 0;
+                    while s > 0 && pad < SCROLL_PAD {
+                        pad += pretty_row_height(arena, entries[s - 1], false);
+                        s -= 1;
+                    }
+                    s
+                };
+
+                // Place sel near the bottom of the viewport with SCROLL_PAD
+                // lines of context below it.
+                let pad_to_bottom = |sel: usize| -> usize {
+                    let sel_h = pretty_row_height(arena, entries[sel], true);
+                    let mut pad_below = 0;
+                    let mut pi = sel + 1;
+                    while pi < total && pad_below < SCROLL_PAD {
+                        pad_below +=
+                            pretty_row_height(arena, entries[pi], false);
+                        pi += 1;
+                    }
+                    let space_above = visible_height
+                        .saturating_sub(sel_h)
+                        .saturating_sub(pad_below);
+                    let mut s = sel;
+                    let mut acc = 0;
+                    while s > 0 {
+                        let h = pretty_row_height(
+                            arena,
+                            entries[s - 1],
+                            false,
+                        );
+                        if acc + h > space_above {
+                            break;
+                        }
+                        acc += h;
+                        s -= 1;
+                    }
+                    s
+                };
+
+                let start = if let Some(prev) = self.pretty_viewport_start {
+                    let prev = prev.min(total.saturating_sub(1));
+
+                    if sel < prev {
+                        // Selection is above the viewport.
+                        pad_to_top(sel)
+                    } else {
+                        // Find sel's screen position relative to prev.
+                        let mut acc = 0usize;
+                        let mut sel_screen_top: Option<usize> = None;
+                        for i in prev..total {
+                            let h =
+                                pretty_row_height(arena, entries[i], i == sel);
+                            if i == sel {
+                                sel_screen_top = Some(acc);
+                                break;
+                            }
+                            acc += h;
+                            if acc >= visible_height {
+                                break;
+                            }
+                        }
+
+                        match sel_screen_top {
+                            None => {
+                                // sel not reached – below viewport.
+                                pad_to_bottom(sel)
+                            }
+                            Some(top) => {
+                                let sel_h = pretty_row_height(
+                                    arena,
+                                    entries[sel],
+                                    true,
+                                );
+                                let bottom = top + sel_h;
+
+                                // Padding margins (only where more entries
+                                // exist in that direction).
+                                let top_margin =
+                                    if sel > 0 { SCROLL_PAD } else { 0 };
+                                let bottom_margin =
+                                    if sel + 1 < total { SCROLL_PAD } else { 0 };
+
+                                if top_margin + sel_h + bottom_margin
+                                    > visible_height
+                                {
+                                    // Viewport too small for padding – just
+                                    // ensure basic visibility.
+                                    if bottom <= visible_height {
+                                        prev
+                                    } else {
+                                        pad_to_bottom(sel)
+                                    }
+                                } else if top < top_margin {
+                                    // sel encroaches on top margin – scroll up.
+                                    pad_to_top(sel)
+                                } else if bottom
+                                    > visible_height.saturating_sub(bottom_margin)
+                                {
+                                    // sel encroaches on bottom margin – scroll
+                                    // down.
+                                    pad_to_bottom(sel)
+                                } else {
+                                    // sel is comfortably within the padded
+                                    // region – keep viewport stable.
+                                    prev
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No previous viewport – first entry into Selected mode.
+                    // Anchor from the bottom using correct expanded heights.
+                    let mut acc = 0usize;
+                    let mut bottom_start = total;
+                    while bottom_start > 0 {
+                        let idx = bottom_start - 1;
+                        let h =
+                            pretty_row_height(arena, entries[idx], idx == sel);
+                        if acc + h > visible_height {
+                            break;
+                        }
+                        acc += h;
+                        bottom_start -= 1;
+                    }
+
+                    if sel >= bottom_start {
+                        bottom_start
+                    } else {
+                        pad_to_top(sel)
+                    }
+                };
+
+                self.pretty_viewport_start = Some(start);
+                start
+            }
+        };
+
+        // Build rows from start_idx, accumulating heights until viewport full.
+        let preview = self.preview_filter();
+        self.visible_row_map.clear();
+        self.log_list_body_y = area.y + 1; // +1 for header row
+        let mut rows: Vec<Row> = Vec::new();
+        let mut accumulated = 0usize;
+        let mut table_select_idx: Option<usize> = None;
+
+        for view_idx in start_idx..total {
+            if accumulated >= visible_height {
+                break;
+            }
+
+            let arena_idx = entries[view_idx];
+            let resolved = arena.resolve_entry(arena_idx);
+            let is_selected = Some(view_idx) == selected_view_idx;
+
+            let display_msg = resolved.inner_message.unwrap_or(resolved.message);
+            let msg_lines: Vec<&str> = display_msg.lines().collect();
+            let msg_line_count = msg_lines.len().max(1);
+
+            // Merge logcli labels + structured fields for display.
+            let all_labels: Vec<(&str, &str)> = resolved
+                .labels
+                .iter()
+                .chain(resolved.structured_fields.iter())
+                .copied()
+                .collect();
+
+            let label_lines = if is_selected { all_labels.len() } else { 0 };
+            let row_height = msg_line_count + label_lines;
+
+            // Indicator column: mark multi-line entries.
+            let indicator = if row_height > 1 {
+                let lines: Vec<Line> = (0..row_height).map(|_| Line::from("│")).collect();
+                Cell::from(Text::from(lines))
+            } else {
+                Cell::from(" ")
+            };
+
+            // Timestamp.
+            let timestamp_str = format!("{}", resolved.timestamp.strftime("%H:%M:%S%.3f"));
+
+            // Level with semantic color.
+            let level_cell = if let Some(lvl) = resolved.level {
+                Cell::from(Span::styled(level_display(lvl), level_style(lvl)))
+            } else {
+                Cell::from("")
+            };
+
+            // Content column.
+            let content = if is_selected {
+                // Expanded: message lines + one line per label.
+                let mut lines: Vec<Line> = msg_lines
+                    .iter()
+                    .enumerate()
+                    .map(|(i, l)| {
+                        if i == 0 {
+                            let chars: String = l.chars().skip(self.h_scroll).collect();
+                            Line::from(chars)
+                        } else {
+                            Line::from(l.to_string())
+                        }
+                    })
+                    .collect();
+                for (k, v) in &all_labels {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}: {}", k, v),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                Cell::from(Text::from(lines))
+            } else if msg_line_count > 1 {
+                // Multi-line message (not selected): show all lines, abridged labels on first.
+                let mut lines: Vec<Line> = Vec::with_capacity(msg_line_count);
+                for (i, l) in msg_lines.iter().enumerate() {
+                    if i == 0 && !all_labels.is_empty() {
+                        let mut label_suffix = String::new();
+                        for (k, v) in &all_labels {
+                            label_suffix.push_str(&format!("  {}={}", k, v));
+                        }
+                        lines.push(Line::from(vec![
+                            Span::raw(l.to_string()),
+                            Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
+                        ]));
+                    } else {
+                        lines.push(Line::from(l.to_string()));
+                    }
+                }
+                Cell::from(Text::from(lines))
+            } else {
+                // Single-line: message + inline abridged labels.
+                if all_labels.is_empty() {
+                    Cell::from(display_msg)
+                } else {
+                    let mut label_suffix = String::new();
+                    for (k, v) in &all_labels {
+                        label_suffix.push_str(&format!("  {}={}", k, v));
+                    }
+                    Cell::from(Line::from(vec![
+                        Span::raw(display_msg.to_string()),
+                        Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
+                    ]))
+                }
+            };
+
+            if is_selected {
+                table_select_idx = Some(rows.len());
+            }
+
+            // Extend row map: each screen row within this entry maps to view_idx.
+            for _ in 0..row_height {
+                self.visible_row_map.push(view_idx);
+            }
+
+            let mut row = Row::new(vec![indicator, Cell::from(timestamp_str), level_cell, content])
+                .height(row_height as u16);
+
+            let mut style = Style::default();
+            if let Some(ref filter) = self.search {
+                if entry_matches_filter(arena, arena_idx, filter) {
+                    style = style.fg(Color::Yellow).bold();
+                }
+            }
+            if let Some(ref pf) = preview {
+                if entry_matches_filter(arena, arena_idx, pf) {
+                    style = style.bold();
+                }
+            }
+            row = row.style(style);
+
+            rows.push(row);
+            accumulated += row_height;
+        }
+
+        let widths = [
+            Constraint::Length(1),  // indicator
+            Constraint::Length(15), // time
+            Constraint::Length(5),  // level
+            Constraint::Min(1),    // content
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(
+                Row::new(vec![" ", "Time", "Level", "Message"])
+                    .style(Style::default().bold().fg(Color::Cyan)),
+            )
+            .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
+
+        let mut table_state = TableState::default();
+        table_state.select(table_select_idx);
+
+        frame.render_stateful_widget(table, area, &mut table_state);
+
+        // Scrollbar overlay.
+        let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None);
+        frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+    }
+
+    fn render_toolbar(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+        view: &LogView,
+    ) {
+        match &self.toolbar_mode {
+            ToolbarMode::Normal => {
+                let filter_depth = self.view_path.len();
+                let entry_count = view.entries.len();
+                let total_count = arena.entries.len();
+                let mode_indicator = match self.scroll {
+                    ScrollState::Tail => "TAIL",
+                    ScrollState::Selected(_) => "SCROLL",
+                };
+
+                let display_label = match self.display_mode {
+                    DisplayMode::Raw => "RAW",
+                    DisplayMode::Pretty => "PRETTY",
+                };
+
+                let search_indicator = match &self.search {
+                    Some(filter) => {
+                        let prefix = if filter.inverted { "!" } else { "" };
+                        let pattern = match &filter.mode {
+                            FilterMode::Substring(s, _) => format!("\"{}\"", s),
+                            FilterMode::Regex(r) => format!("/{}/", r.as_str()),
+                        };
+                        format!(" | ?:{}{}", prefix, pattern)
+                    }
+                    None => String::new(),
+                };
+
+                let has_loki = self.source_restart_tx.is_some();
+                let hints = match (self.search.is_some(), has_loki) {
+                    (true, true) => "q:quit /:filter ?:search n/N:match Esc:clear e:query v:view",
+                    (true, false) => "q:quit /:filter ?:search n/N:match Esc:clear v:view",
+                    (false, true) => "q:quit /:filter ?:search e:query v:view",
+                    (false, false) => "q:quit /:filter ?:search v:view",
+                };
+
+                let status = format!(
+                    " {} | {} | Filters: {} | View: {}/{} entries{} | {}",
+                    mode_indicator, display_label, filter_depth, entry_count, total_count,
+                    search_indicator, hints,
+                );
+
+                let paragraph = Paragraph::new(Line::from(status))
+                    .style(Style::default().bg(Color::Blue).fg(Color::White));
+                frame.render_widget(paragraph, area);
+            }
+            ToolbarMode::FilterEntry => {
+                let mode_label = match self.filter_entry_mode {
+                    FilterEntryMode::Substring => "SUB",
+                    FilterEntryMode::Regex => "RGX",
+                };
+
+                let base_style = Style::default().bg(Color::Yellow).fg(Color::Black);
+
+                let mut spans = vec![
+                    Span::styled(format!(" [{}]", mode_label), base_style),
+                ];
+
+                if self.filter_inverted {
+                    spans.push(Span::styled(
+                        " NOT",
+                        Style::default().bg(Color::Red).fg(Color::White).bold(),
+                    ));
+                }
+
+                let filter_text = format!(" Filter: {}", self.filter_input);
+                spans.push(Span::styled(filter_text, base_style));
+
+                // Fill remaining width with background color.
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
+                frame.render_widget(paragraph, area);
+
+                // Position cursor within the filter input.
+                // prefix spans: " [MODE]" + optional " NOT" + " Filter: "
+                let prefix_len = 2 + mode_label.len() + 1
+                    + if self.filter_inverted { 4 } else { 0 }
+                    + 9;
+                let cursor_x =
+                    area.x + prefix_len as u16 + self.filter_cursor as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+            ToolbarMode::SearchEntry => {
+                let mode_label = match self.filter_entry_mode {
+                    FilterEntryMode::Substring => "SUB",
+                    FilterEntryMode::Regex => "RGX",
+                };
+
+                let base_style = Style::default().bg(Color::Magenta).fg(Color::White);
+
+                let mut spans = vec![
+                    Span::styled(format!(" [{}]", mode_label), base_style),
+                ];
+
+                if self.filter_inverted {
+                    spans.push(Span::styled(
+                        " NOT",
+                        Style::default().bg(Color::Red).fg(Color::White).bold(),
+                    ));
+                }
+
+                let search_text = format!(" Search: {}", self.filter_input);
+                spans.push(Span::styled(search_text, base_style));
+
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
+                frame.render_widget(paragraph, area);
+
+                // prefix spans: " [MODE]" + optional " NOT" + " Search: "
+                let prefix_len = 2 + mode_label.len() + 1
+                    + if self.filter_inverted { 4 } else { 0 }
+                    + 9;
+                let cursor_x =
+                    area.x + prefix_len as u16 + self.filter_cursor as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+            ToolbarMode::QueryEntry => {
+                let base_style = Style::default().bg(Color::Green).fg(Color::Black);
+
+                let query_text = format!(" Query: {}", self.query_input);
+                let spans = vec![Span::styled(query_text, base_style)];
+
+                let used: usize = spans.iter().map(|s| s.content.len()).sum();
+                let remaining = (area.width as usize).saturating_sub(used);
+                let mut spans = spans;
+                if remaining > 0 {
+                    spans.push(Span::styled(" ".repeat(remaining), base_style));
+                }
+
+                let paragraph = Paragraph::new(Line::from(spans));
+                frame.render_widget(paragraph, area);
+
+                // prefix: " Query: " = 8 chars
+                let cursor_x = area.x + 8 + self.query_cursor as u16;
+                frame.set_cursor_position((cursor_x, area.y));
+            }
+        }
+    }
+
+    fn render_tree_select_overlay(
+        &self,
+        frame: &mut Frame,
+        area: ratatui::layout::Rect,
+        arena: &Arena,
+    ) {
+        let cursor = match self.tree_select_cursor {
+            Some(c) => c,
+            None => return,
+        };
+
+        let mut flat: Vec<(super::ViewPath, String)> = Vec::new();
+        let mut path: super::ViewPath = Vec::new();
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat);
+
+        let popup_area = centered_rect(72, 65, area);
+        frame.render_widget(Clear, popup_area);
+
+        let items: Vec<ListItem> = flat
+            .iter()
+            .map(|(p, label)| {
+                let style = if *p == self.view_path {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(label.as_str()).style(style)
+            })
+            .collect();
+
+        let cursor = cursor.min(flat.len().saturating_sub(1));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Views ")
+                    .title_bottom(" ↑↓ / j k : navigate   Enter / Tab : go   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol("> ");
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(cursor));
+        frame.render_stateful_widget(list, popup_area, &mut list_state);
+    }
+}
+
+/// Compute the row height for an entry in pretty mode.
+pub(super) fn pretty_row_height(arena: &Arena, arena_idx: usize, is_selected: bool) -> usize {
+    let resolved = arena.resolve_entry(arena_idx);
+    let msg = resolved.inner_message.unwrap_or(resolved.message);
+    let msg_lines = msg.lines().count().max(1);
+    let label_lines = if is_selected {
+        resolved.labels.len() + resolved.structured_fields.len()
+    } else {
+        0
+    };
+    msg_lines + label_lines
+}
+
+fn level_style(level: &str) -> Style {
+    match level.to_ascii_lowercase().as_str() {
+        "trace" => Style::default().fg(Color::DarkGray),
+        "debug" => Style::default().fg(Color::Cyan),
+        "info" => Style::default().fg(Color::Green),
+        "warn" | "warning" => Style::default().fg(Color::Yellow),
+        "error" | "err" => Style::default().fg(Color::Red),
+        "fatal" | "panic" | "critical" | "dpanic" => Style::default().fg(Color::Red).bold(),
+        _ => Style::default(),
+    }
+}
+
+fn level_display(level: &str) -> String {
+    let upper = level.to_ascii_uppercase();
+    let display = match upper.as_str() {
+        "WARNING" => "WARN",
+        other if other.len() > 5 => &other[..5],
+        other => other,
+    };
+    format!("{:<5}", display)
+}
+
+/// Return a centered `Rect` carved out of `area`.
+fn centered_rect(percent_x: u16, percent_y: u16, area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    let vertical = Layout::vertical([
+        Constraint::Percentage((100 - percent_y) / 2),
+        Constraint::Percentage(percent_y),
+        Constraint::Percentage((100 - percent_y) / 2),
+    ])
+    .split(area);
+    Layout::horizontal([
+        Constraint::Percentage((100 - percent_x) / 2),
+        Constraint::Percentage(percent_x),
+        Constraint::Percentage((100 - percent_x) / 2),
+    ])
+    .split(vertical[1])[1]
+}
