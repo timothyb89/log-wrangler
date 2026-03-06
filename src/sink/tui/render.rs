@@ -64,7 +64,7 @@ impl App {
         view: &LogView,
     ) {
         // Show empty state prompt when no entries and no Loki sources.
-        if view.entries.is_empty() && self.loki_restarts.is_empty() {
+        if view.entries.is_empty() && self.sources.is_empty() {
             let msg = Paragraph::new("No sources configured. Press `a` to add a Loki source.")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(ratatui::layout::Alignment::Center);
@@ -900,14 +900,13 @@ impl App {
         let popup_area = centered_rect(50, 50, area);
         frame.render_widget(Clear, popup_area);
 
-        let items: Vec<ListItem> = arena
-            .source_names
+        let items: Vec<ListItem> = self
+            .sources
             .iter()
-            .enumerate()
-            .map(|(id, name)| {
-                let count = view.entries.iter().filter(|&&idx| arena.entries[idx].source_id == id as u16).count();
-                let label = format!("{name}  ({count} entries)");
-                ListItem::new(label).style(source_style(id as u16))
+            .map(|source| {
+                let count = view.entries.iter().filter(|&&idx| arena.entries[idx].source_id == source.source_id).count();
+                let label = format!("{}  ({} entries)", source.name, count);
+                ListItem::new(label).style(source_style(source.source_id))
             })
             .collect();
 
@@ -917,7 +916,7 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Sources ")
-                    .title_bottom(" Enter : filter   e : edit   a : add   Esc : cancel "),
+                    .title_bottom(" Enter : filter   e : edit   a : add   c : clone   d : delete   Esc : cancel "),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol("> ");

@@ -89,13 +89,18 @@ async fn main() -> Result<()> {
         log::ingest(rx, arena_clone, reorder_buffer);
     });
 
-    // Spawn each source and collect per-source restart senders for Loki sources.
-    let mut loki_restarts: Vec<sink::tui::SourceRestart> = Vec::new();
+    // Spawn each source and collect managed-source state for stoppable sources.
+    let mut managed_sources: Vec<sink::tui::ManagedSource> = Vec::new();
     let num_cli_sources = sources.len();
 
     for src in sources {
         match src.config {
             SourceConfig::Stdin => {
+                managed_sources.push(sink::tui::ManagedSource {
+                    source_id: src.id,
+                    name: src.name,
+                    kind: sink::tui::ManagedSourceKind::Stdin,
+                });
                 // Spawn stdin reader only when stdin is piped (not a TTY).
                 // When stdin is a TTY, crossterm needs exclusive access for keyboard events.
                 if !std::io::stdin().is_terminal() {
@@ -135,11 +140,14 @@ async fn main() -> Result<()> {
 
                 let (wtx, wrx) = tokio::sync::watch::channel(None);
 
-                loki_restarts.push(sink::tui::SourceRestart {
+                managed_sources.push(sink::tui::ManagedSource {
                     source_id: src.id,
                     name: src.name,
-                    tx: wtx,
-                    query,
+                    kind: sink::tui::ManagedSourceKind::Loki {
+                        base_url: base_url.clone(),
+                        query,
+                        tx: wtx,
+                    },
                 });
 
                 let tx_loki = tx.clone();
@@ -154,7 +162,7 @@ async fn main() -> Result<()> {
     let next_source_id = num_cli_sources as u16;
 
     // Run the TUI on the async runtime.
-    sink::tui::run_tui(arena, loki_restarts, tx, next_source_id).await?;
+    sink::tui::run_tui(arena, managed_sources, tx, next_source_id).await?;
 
     Ok(())
 }

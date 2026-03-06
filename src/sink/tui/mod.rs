@@ -92,16 +92,25 @@ struct SourceDialogState {
 enum SourceDialogMode {
     /// All fields editable.
     Add,
-    /// Only query editable. `loki_idx` indexes into `App::loki_restarts`.
-    Edit { loki_idx: usize },
+    /// Only query editable. `source_idx` indexes into `App::sources`.
+    Edit { source_idx: usize },
 }
 
-/// Per-source restart state for Loki sources.
-pub(crate) struct SourceRestart {
+/// Source-type-specific state needed to manage a running source.
+pub(crate) enum ManagedSourceKind {
+    Stdin,
+    Loki {
+        base_url: url::Url,
+        query: String,
+        tx: tokio::sync::watch::Sender<Option<LokiSourceParams>>,
+    },
+}
+
+/// State for a managed (stoppable/editable) source.
+pub(crate) struct ManagedSource {
     pub source_id: u16,
     pub name: String,
-    pub tx: tokio::sync::watch::Sender<Option<LokiSourceParams>>,
-    pub query: String,
+    pub kind: ManagedSourceKind,
 }
 
 pub(crate) struct App {
@@ -175,8 +184,8 @@ pub(crate) struct App {
     /// do not shift the viewport.
     pretty_viewport_start: Option<usize>,
 
-    /// Per-source Loki restart state. Empty when no Loki sources exist.
-    loki_restarts: Vec<SourceRestart>,
+    /// Managed sources (stoppable/editable). Empty when no managed sources exist.
+    sources: Vec<ManagedSource>,
 
     /// Sender for the log ingest channel. Cloned for each dynamically-added source.
     ingest_tx: mpsc::Sender<SourceMessage>,
@@ -188,7 +197,7 @@ pub(crate) struct App {
 impl App {
     fn new(
         arena: Arc<Mutex<Arena>>,
-        loki_restarts: Vec<SourceRestart>,
+        sources: Vec<ManagedSource>,
         ingest_tx: mpsc::Sender<SourceMessage>,
         next_source_id: u16,
     ) -> Self {
@@ -214,7 +223,7 @@ impl App {
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
             pretty_viewport_start: None,
-            loki_restarts,
+            sources,
             ingest_tx,
             next_source_id,
         }
@@ -230,7 +239,7 @@ impl App {
 /// Run the TUI event loop. This takes ownership of stdout for rendering.
 pub(crate) async fn run_tui(
     arena: Arc<Mutex<Arena>>,
-    loki_restarts: Vec<SourceRestart>,
+    sources: Vec<ManagedSource>,
     ingest_tx: mpsc::Sender<SourceMessage>,
     next_source_id: u16,
 ) -> Result<()> {
@@ -241,7 +250,7 @@ pub(crate) async fn run_tui(
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = ratatui::Terminal::new(backend)?;
 
-    let mut app = App::new(arena, loki_restarts, ingest_tx, next_source_id);
+    let mut app = App::new(arena, sources, ingest_tx, next_source_id);
     let mut event_stream = EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 

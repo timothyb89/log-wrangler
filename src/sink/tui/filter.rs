@@ -2,7 +2,7 @@ use crate::filter::{Filter, FilterMode, FilterTarget};
 use crate::log::{Arena, LogView, ViewPath};
 use crate::source::loki::LokiSourceParams;
 
-use super::{App, Direction, FilterEntryMode, OverlayMode, ScrollState, SourceDialogMode, SourceRestart, ToolbarMode};
+use super::{App, Direction, FilterEntryMode, ManagedSource, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogMode, ToolbarMode};
 
 impl App {
     pub(super) fn submit_source_dialog(&mut self) {
@@ -50,8 +50,8 @@ impl App {
                 self.spawn_loki_source(name, base_url, query);
                 self.overlay = OverlayMode::None;
             }
-            SourceDialogMode::Edit { loki_idx } => {
-                let loki_idx = *loki_idx;
+            SourceDialogMode::Edit { source_idx } => {
+                let source_idx = *source_idx;
                 let new_query = state.fields[2].trim().to_string();
 
                 if new_query.is_empty() {
@@ -64,19 +64,21 @@ impl App {
                 }
 
                 // Signal restart with the new query.
-                if let Some(restart) = self.loki_restarts.get_mut(loki_idx) {
-                    restart.query = new_query.clone();
-                    let now = jiff::Zoned::now();
-                    let start = now
-                        .checked_sub(jiff::SignedDuration::from_hours(1))
-                        .unwrap_or(now.clone());
-                    let params = LokiSourceParams {
-                        query: new_query,
-                        start_ns: start.timestamp().as_nanosecond(),
-                        end_ns: None,
-                        follow: true,
-                    };
-                    let _ = restart.tx.send(Some(params));
+                if let Some(source) = self.sources.get_mut(source_idx) {
+                    if let ManagedSourceKind::Loki { tx, query, .. } = &mut source.kind {
+                        *query = new_query.clone();
+                        let now = jiff::Zoned::now();
+                        let start = now
+                            .checked_sub(jiff::SignedDuration::from_hours(1))
+                            .unwrap_or(now.clone());
+                        let params = LokiSourceParams {
+                            query: new_query,
+                            start_ns: start.timestamp().as_nanosecond(),
+                            end_ns: None,
+                            follow: true,
+                        };
+                        let _ = tx.send(Some(params));
+                    }
                 }
 
                 self.overlay = OverlayMode::None;
@@ -120,15 +122,35 @@ impl App {
 
         let tx = self.ingest_tx.clone();
         tokio::spawn(crate::source::loki::run_loki_source(
-            base_url, params, tx, wrx, source_id,
+            base_url.clone(), params, tx, wrx, source_id,
         ));
 
-        self.loki_restarts.push(SourceRestart {
+        self.sources.push(ManagedSource {
             source_id,
             name,
-            tx: wtx,
-            query,
+            kind: ManagedSourceKind::Loki {
+                base_url,
+                query,
+                tx: wtx,
+            },
         });
+    }
+
+    /// Remove all view references to entries from the given source, then
+    /// clamp scroll if it's now out of range.
+    pub(super) fn purge_source_entries(&mut self, source_id: u16) {
+        let Ok(mut arena) = self.arena.lock() else { return };
+        arena.clear_source(source_id);
+        let count = arena.view_at(&self.view_path).entries.len();
+        drop(arena);
+        self.current_entry_count = count;
+        if let ScrollState::Selected(idx) = self.scroll {
+            if idx >= self.current_entry_count {
+                self.scroll = ScrollState::Tail;
+                self.h_scroll = 0;
+                self.v_scroll = 0;
+            }
+        }
     }
 
     pub(super) fn apply_filter(&mut self) {

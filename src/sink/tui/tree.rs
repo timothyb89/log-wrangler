@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::filter::{FilterMode, FilterTarget};
 use crate::log::{LogView, ViewPath};
 
-use super::{App, OverlayMode};
+use super::{App, ManagedSourceKind, OverlayMode};
 
 impl App {
     pub(super) fn enter_tree_select(&mut self) {
@@ -59,10 +59,6 @@ impl App {
     }
 
     pub(super) fn enter_source_select(&mut self) {
-        let Ok(arena) = self.arena.lock() else { return };
-        if arena.source_names.len() <= 1 {
-            return;
-        }
         self.overlay = OverlayMode::SourceSelect { cursor: 0 };
     }
 
@@ -81,21 +77,21 @@ impl App {
                 };
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let Ok(arena) = self.arena.lock() else { return };
-                let max = arena.source_names.len().saturating_sub(1);
+                let max = self.sources.len().saturating_sub(1);
                 self.overlay = OverlayMode::SourceSelect {
                     cursor: (cursor + 1).min(max),
                 };
             }
             KeyCode::Enter => {
-                let source_id = cursor as u16;
-                self.overlay = OverlayMode::None;
-                self.apply_source_filter(source_id);
+                if let Some(source) = self.sources.get(cursor) {
+                    let source_id = source.source_id;
+                    self.overlay = OverlayMode::None;
+                    self.apply_source_filter(source_id);
+                }
             }
             KeyCode::Char('e') => {
-                let source_id = cursor as u16;
                 self.overlay = OverlayMode::None;
-                self.open_edit_dialog_for_source(source_id);
+                self.open_edit_dialog_for_source_idx(cursor);
             }
             KeyCode::Char('a') => {
                 self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
@@ -106,34 +102,56 @@ impl App {
                     error: None,
                 });
             }
+            KeyCode::Char('d') => {
+                if cursor < self.sources.len() {
+                    let source_id = self.sources[cursor].source_id;
+                    // Dropping the source drops its kind, which closes the watch channel
+                    // and causes the source task to exit.
+                    self.sources.remove(cursor);
+                    // Purge existing log entries from all views.
+                    self.purge_source_entries(source_id);
+                }
+                let max = self.sources.len().saturating_sub(1);
+                self.overlay = OverlayMode::SourceSelect { cursor: cursor.min(max) };
+            }
+            KeyCode::Char('c') => {
+                if let Some(source) = self.sources.get(cursor) {
+                    if let ManagedSourceKind::Loki { base_url, query, .. } = &source.kind {
+                        let url_str = base_url.to_string();
+                        let query = query.clone();
+                        self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                            mode: super::SourceDialogMode::Add,
+                            fields: [String::new(), url_str.clone(), query.clone()],
+                            cursors: [0, url_str.len(), query.len()],
+                            active_field: 2,
+                            error: None,
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    /// Open the source edit dialog for a specific Loki source by its source_id.
-    pub(super) fn open_edit_dialog_for_source(&mut self, source_id: u16) {
-        let Some(loki_idx) = self.loki_restarts.iter().position(|r| r.source_id == source_id) else {
+    /// Open the source edit dialog for a source by its index in `sources`.
+    /// Currently only Loki sources have an editable query; other kinds are no-ops.
+    pub(super) fn open_edit_dialog_for_source_idx(&mut self, source_idx: usize) {
+        let Some(source) = self.sources.get(source_idx) else {
             return;
         };
-        self.open_edit_dialog_for_loki_idx(loki_idx);
-    }
-
-    /// Open the source edit dialog for a Loki source by its index in `loki_restarts`.
-    pub(super) fn open_edit_dialog_for_loki_idx(&mut self, loki_idx: usize) {
-        let Some(restart) = self.loki_restarts.get(loki_idx) else {
-            return;
-        };
-        self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
-            mode: super::SourceDialogMode::Edit { loki_idx },
-            fields: [
-                restart.name.clone(),
-                String::new(),
-                restart.query.clone(),
-            ],
-            cursors: [0, 0, restart.query.len()],
-            active_field: 2, // focus on query
-            error: None,
-        });
+        if let ManagedSourceKind::Loki { query, .. } = &source.kind {
+            self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                mode: super::SourceDialogMode::Edit { source_idx },
+                fields: [
+                    source.name.clone(),
+                    String::new(),
+                    query.clone(),
+                ],
+                cursors: [0, 0, query.len()],
+                active_field: 2, // focus on query
+                error: None,
+            });
+        }
     }
 
     /// Flatten the view tree into (path, display-line) pairs for the overlay.
