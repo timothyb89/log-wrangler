@@ -138,6 +138,7 @@ impl App {
                     cursors: [0, 0, 0],
                     active_field: 1, // start on URL field
                     error: None,
+                    tls: None,
                 });
             }
             (KeyCode::Char('s'), _) => {

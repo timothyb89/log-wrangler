@@ -15,6 +15,7 @@ mod util;
 
 use cli::Args;
 use source::loki::LokiSourceParams;
+use source::teleport::TeleportTlsConfig;
 use source::{NamedQuery, NamedSource, SourceConfig, SourceMessage};
 
 #[tokio::main]
@@ -89,6 +90,19 @@ async fn main() -> Result<()> {
         log::ingest(rx, arena_clone, reorder_buffer);
     });
 
+    // Resolve any Teleport sources before opening the TUI so that `tsh` can
+    // freely interact with the terminal (prompt for MFA, etc.).
+    let mut teleport_resolved: HashMap<u16, (url::Url, TeleportTlsConfig)> = HashMap::new();
+    for src in &sources {
+        if let SourceConfig::GrafanaLokiTeleport { app_name, loki_path } = &src.config {
+            let tsh_cfg = source::teleport::fetch_tsh_app_config(app_name)?;
+            let base_url = tsh_cfg.uri.join(loki_path)
+                .map_err(|e| eyre!("Failed to construct Teleport base URL: {}", e))?;
+            let tls = source::teleport::build_tls_config(&tsh_cfg)?;
+            teleport_resolved.insert(src.id, (base_url, tls));
+        }
+    }
+
     // Spawn each source and collect managed-source state for stoppable sources.
     let mut managed_sources: Vec<sink::tui::ManagedSource> = Vec::new();
     let num_cli_sources = sources.len();
@@ -128,13 +142,10 @@ async fn main() -> Result<()> {
                 let start = cli::resolve_start_time(&args.start, &args.since, &now)?;
                 let end = cli::resolve_end_time(&args.end, &now)?;
 
-                let start_ns = start.timestamp().as_nanosecond();
-                let end_ns = end.timestamp().as_nanosecond();
-
                 let params = LokiSourceParams {
                     query: query.clone(),
-                    start_ns,
-                    end_ns: Some(end_ns),
+                    start_ns: start.timestamp().as_nanosecond(),
+                    end_ns: Some(end.timestamp().as_nanosecond()),
                     follow: args.follow,
                 };
 
@@ -147,6 +158,7 @@ async fn main() -> Result<()> {
                         base_url: base_url.clone(),
                         query,
                         tx: wtx,
+                        tls: None,
                     },
                 });
 
@@ -154,6 +166,57 @@ async fn main() -> Result<()> {
                 let sid = src.id;
                 tokio::spawn(source::loki::run_loki_source(
                     base_url, params, tx_loki, wrx, sid,
+                    reqwest::Client::new(), None,
+                ));
+            }
+            SourceConfig::GrafanaLokiTeleport { .. } => {
+                let (base_url, tls) = teleport_resolved.remove(&src.id)
+                    .expect("Teleport source was resolved above");
+
+                let query = named_queries
+                    .remove(&src.name)
+                    .or_else(|| default_query.clone())
+                    .ok_or_else(|| {
+                        eyre!(
+                            "--query is required for Teleport source '{}'. \
+                             Use --query '{}=<logql>' or a bare --query '<logql>'",
+                            src.name,
+                            src.name,
+                        )
+                    })?;
+
+                let now = jiff::Zoned::now();
+                let start = cli::resolve_start_time(&args.start, &args.since, &now)?;
+                let end = cli::resolve_end_time(&args.end, &now)?;
+
+                let params = LokiSourceParams {
+                    query: query.clone(),
+                    start_ns: start.timestamp().as_nanosecond(),
+                    end_ns: Some(end.timestamp().as_nanosecond()),
+                    follow: args.follow,
+                };
+
+                let (wtx, wrx) = tokio::sync::watch::channel(None);
+
+                let http_client = tls.http_client.clone();
+                let ws_tls = Some(tls.rustls_config.clone());
+
+                managed_sources.push(sink::tui::ManagedSource {
+                    source_id: src.id,
+                    name: src.name,
+                    kind: sink::tui::ManagedSourceKind::Loki {
+                        base_url: base_url.clone(),
+                        query,
+                        tx: wtx,
+                        tls: Some(tls),
+                    },
+                });
+
+                let tx_loki = tx.clone();
+                let sid = src.id;
+                tokio::spawn(source::loki::run_loki_source(
+                    base_url, params, tx_loki, wrx, sid,
+                    http_client, ws_tls,
                 ));
             }
         }

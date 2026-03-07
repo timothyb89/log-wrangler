@@ -100,6 +100,7 @@ impl App {
                     cursors: [0, 0, 0],
                     active_field: 1,
                     error: None,
+                    tls: None,
                 });
             }
             KeyCode::Char('d') => {
@@ -116,15 +117,17 @@ impl App {
             }
             KeyCode::Char('c') => {
                 if let Some(source) = self.sources.get(cursor) {
-                    if let ManagedSourceKind::Loki { base_url, query, .. } = &source.kind {
+                    if let ManagedSourceKind::Loki { base_url, query, tls, .. } = &source.kind {
                         let url_str = base_url.to_string();
                         let query = query.clone();
+                        let tls = tls.clone();
                         self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
                             mode: super::SourceDialogMode::Add,
                             fields: [String::new(), url_str.clone(), query.clone()],
                             cursors: [0, url_str.len(), query.len()],
                             active_field: 2,
                             error: None,
+                            tls,
                         });
                     }
                 }
@@ -150,6 +153,7 @@ impl App {
                 cursors: [0, 0, query.len()],
                 active_field: 2, // focus on query
                 error: None,
+                tls: None, // edit only changes query; TLS lives in ManagedSourceKind
             });
         }
     }

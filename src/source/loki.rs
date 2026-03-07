@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc;
 
 use color_eyre::eyre::eyre;
@@ -218,12 +219,25 @@ async fn tail_stream(
     start_ns: i128,
     tx: &mpsc::Sender<SourceMessage>,
     source_id: u16,
+    tls_config: Option<Arc<rustls::ClientConfig>>,
 ) -> Result<()> {
     let url = make_tail_url(base_url, query, start_ns)?;
 
-    let (ws_stream, _response) = tokio_tungstenite::connect_async(&url)
-        .await
-        .map_err(|e| eyre!("WebSocket connection to '{}' failed: {}", url, e))?;
+    let ws_stream = match tls_config {
+        Some(cfg) => {
+            let connector = tokio_tungstenite::Connector::Rustls(cfg);
+            tokio_tungstenite::connect_async_tls_with_config(&url, None, false, Some(connector))
+                .await
+                .map_err(|e| eyre!("WebSocket connection to '{}' failed: {}", url, e))?
+                .0
+        }
+        None => {
+            tokio_tungstenite::connect_async(&url)
+                .await
+                .map_err(|e| eyre!("WebSocket connection to '{}' failed: {}", url, e))?
+                .0
+        }
+    };
 
     tracing::info!("WebSocket tail connected to {}", url);
 
@@ -271,14 +285,20 @@ async fn tail_stream(
 /// Run the Loki source. Performs an initial historical backfill via query_range,
 /// then optionally streams via WebSocket tail. Listens for restart signals
 /// from the TUI via the watch channel.
+///
+/// `client` is a pre-built reqwest client (pass `reqwest::Client::new()` for
+/// plain HTTP/HTTPS; pass a client with mTLS for Teleport sources).
+/// `tls_config` is used for the WebSocket tail connection; pass `None` for
+/// non-Teleport sources.
 pub async fn run_loki_source(
     base_url: url::Url,
     initial_params: LokiSourceParams,
     tx: mpsc::Sender<SourceMessage>,
     mut restart_rx: tokio::sync::watch::Receiver<Option<LokiSourceParams>>,
     source_id: u16,
+    client: reqwest::Client,
+    tls_config: Option<Arc<rustls::ClientConfig>>,
 ) {
-    let client = reqwest::Client::new();
     let mut params = initial_params;
 
     loop {
@@ -335,29 +355,31 @@ pub async fn run_loki_source(
             continue;
         }
 
+        // Inner reconnect loop: only the WebSocket is restarted on disconnect;
+        // a restart signal breaks out to the outer loop for a full re-backfill.
         let tail_start = last_ts + 1;
-        tracing::info!("Loki tail: query={:?} start={}", params.query, tail_start);
+        loop {
+            tracing::info!("Loki tail: query={:?} start={}", params.query, tail_start);
 
-        tokio::select! {
-            result = tail_stream(&base_url, &params.query, tail_start, &tx, source_id) => {
-                match result {
-                    Ok(()) => tracing::info!("WebSocket tail closed, reconnecting..."),
-                    Err(e) => tracing::warn!("WebSocket tail error: {}, reconnecting...", e),
+            tokio::select! {
+                result = tail_stream(&base_url, &params.query, tail_start, &tx, source_id, tls_config.clone()) => {
+                    match result {
+                        Ok(()) => tracing::info!("WebSocket tail closed, reconnecting..."),
+                        Err(e) => tracing::warn!("WebSocket tail error: {}, reconnecting...", e),
+                    }
+                    // Brief pause to avoid tight reconnect loops, then retry the tail only.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 }
-                // On disconnect, loop back to re-backfill + re-tail.
-                // Brief sleep to avoid tight reconnect loops.
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                continue;
-            }
-            result = restart_rx.changed() => {
-                if result.is_err() {
-                    return;
+                result = restart_rx.changed() => {
+                    if result.is_err() {
+                        return;
+                    }
+                    if let Some(new_params) = restart_rx.borrow_and_update().clone() {
+                        let _ = tx.send(SourceMessage::Reset { source_id });
+                        params = new_params;
+                    }
+                    break; // full restart: re-backfill with new params
                 }
-                if let Some(new_params) = restart_rx.borrow_and_update().clone() {
-                    let _ = tx.send(SourceMessage::Reset { source_id });
-                    params = new_params;
-                }
-                continue;
             }
         }
     }

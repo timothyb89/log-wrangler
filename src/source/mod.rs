@@ -5,6 +5,7 @@ use color_eyre::Result;
 
 pub mod loki;
 pub mod stdin;
+pub mod teleport;
 
 pub struct RawLog {
     pub timestamp: jiff::Zoned,
@@ -26,6 +27,10 @@ pub enum SourceMessage {
 pub enum SourceConfig {
     Stdin,
     GrafanaLoki { base_url: url::Url },
+    /// Grafana+Loki accessed through a Teleport app proxy.
+    /// `app_name` is the Teleport app name; `loki_path` is the path on the
+    /// proxied host that serves as the Loki base URL.
+    GrafanaLokiTeleport { app_name: String, loki_path: String },
 }
 
 /// A source with an assigned name and numeric ID.
@@ -85,6 +90,7 @@ pub fn parse_named_source(raw: &str, index: usize) -> Result<NamedSource> {
     let name = name.unwrap_or_else(|| match &config {
         SourceConfig::Stdin => "stdin".to_string(),
         SourceConfig::GrafanaLoki { .. } => format!("loki-{}", index),
+        SourceConfig::GrafanaLokiTeleport { app_name, .. } => app_name.clone(),
     });
 
     Ok(NamedSource {
@@ -105,6 +111,25 @@ pub fn parse_source_uri(uri: &str) -> Result<SourceConfig> {
         return Ok(SourceConfig::Stdin);
     }
 
+    if let Some(rest) = uri.strip_prefix("grafana+loki+teleport://") {
+        // rest = "app-name/api/datasources/proxy/uid/..."
+        let (app_name, loki_path) = match rest.find('/') {
+            Some(pos) => (&rest[..pos], &rest[pos..]),
+            None => (rest, "/"),
+        };
+        if app_name.is_empty() {
+            return Err(eyre!(
+                "Missing app name in Teleport source URI '{}'. \
+                 Expected 'grafana+loki+teleport://app-name/path'",
+                uri
+            ));
+        }
+        return Ok(SourceConfig::GrafanaLokiTeleport {
+            app_name: app_name.to_string(),
+            loki_path: loki_path.to_string(),
+        });
+    }
+
     if let Some(rest) = uri.strip_prefix("grafana+loki+") {
         let url = url::Url::parse(rest)
             .map_err(|e| eyre!("Invalid Grafana Loki URL '{}': {}", rest, e))?;
@@ -112,7 +137,8 @@ pub fn parse_source_uri(uri: &str) -> Result<SourceConfig> {
     }
 
     Err(eyre!(
-        "Unknown source URI scheme: '{}'. Expected 'stdin://' or 'grafana+loki+http://...'",
+        "Unknown source URI scheme: '{}'. \
+         Expected 'stdin://', 'grafana+loki+http://...', or 'grafana+loki+teleport://app-name/path'",
         uri
     ))
 }

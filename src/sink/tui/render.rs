@@ -12,7 +12,7 @@ use crate::log::{Arena, LogView};
 use crate::util::INTERNAL_SOURCE_ID;
 
 use super::filter::entry_matches_filter;
-use super::{App, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
+use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
 
 fn format_timestamp(ts: &jiff::Zoned, mode: TimezoneMode) -> String {
     let converted = match mode {
@@ -905,7 +905,13 @@ impl App {
             .iter()
             .map(|source| {
                 let count = view.entries.iter().filter(|&&idx| arena.entries[idx].source_id == source.source_id).count();
-                let label = format!("{}  ({} entries)", source.name, count);
+                let teleport_badge = match &source.kind {
+                    ManagedSourceKind::Loki { tls: Some(t), .. } => {
+                        format!("  \u{2022}teleport:{}", t.app_name)
+                    }
+                    _ => String::new(),
+                };
+                let label = format!("{}{}  ({} entries)", source.name, teleport_badge, count);
                 ListItem::new(label).style(source_style(source.source_id))
             })
             .collect();

@@ -19,6 +19,7 @@ use crate::filter::Filter;
 use crate::log::{Arena, ViewPath};
 use crate::source::SourceMessage;
 use crate::source::loki::LokiSourceParams;
+use crate::source::teleport::TeleportTlsConfig;
 
 /// The mode the bottom toolbar is in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +88,9 @@ struct SourceDialogState {
     active_field: usize,
     /// Validation error to display, if any.
     error: Option<String>,
+    /// Teleport TLS config carried over when cloning a Teleport source.
+    /// `None` for manually-entered (plain HTTP/HTTPS) sources.
+    tls: Option<TeleportTlsConfig>,
 }
 
 enum SourceDialogMode {
@@ -103,6 +107,10 @@ pub(crate) enum ManagedSourceKind {
         base_url: url::Url,
         query: String,
         tx: tokio::sync::watch::Sender<Option<LokiSourceParams>>,
+        /// Set when this source was created from a `grafana+loki+teleport://`
+        /// URI. Carries the mTLS credentials so they can be reused when the
+        /// source is cloned or its query is restarted.
+        tls: Option<TeleportTlsConfig>,
     },
 }
 

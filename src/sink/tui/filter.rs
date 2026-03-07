@@ -1,6 +1,7 @@
 use crate::filter::{Filter, FilterMode, FilterTarget};
 use crate::log::{Arena, LogView, ViewPath};
 use crate::source::loki::LokiSourceParams;
+use crate::source::teleport::TeleportTlsConfig;
 
 use super::{App, Direction, FilterEntryMode, ManagedSource, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogMode, ToolbarMode};
 
@@ -46,8 +47,9 @@ impl App {
                     }
                 };
                 let query = query.to_string();
+                let tls = state.tls.clone();
 
-                self.spawn_loki_source(name, base_url, query);
+                self.spawn_loki_source(name, base_url, query, tls);
                 self.overlay = OverlayMode::None;
             }
             SourceDialogMode::Edit { source_idx } => {
@@ -94,7 +96,13 @@ impl App {
         }
     }
 
-    fn spawn_loki_source(&mut self, name: String, base_url: url::Url, query: String) {
+    fn spawn_loki_source(
+        &mut self,
+        name: String,
+        base_url: url::Url,
+        query: String,
+        tls: Option<TeleportTlsConfig>,
+    ) {
         let source_id = self.next_source_id;
         self.next_source_id += 1;
 
@@ -120,9 +128,15 @@ impl App {
             follow: true,
         };
 
+        let http_client = tls
+            .as_ref()
+            .map(|t| t.http_client.clone())
+            .unwrap_or_else(reqwest::Client::new);
+        let ws_tls = tls.as_ref().map(|t| t.rustls_config.clone());
+
         let tx = self.ingest_tx.clone();
         tokio::spawn(crate::source::loki::run_loki_source(
-            base_url.clone(), params, tx, wrx, source_id,
+            base_url.clone(), params, tx, wrx, source_id, http_client, ws_tls,
         ));
 
         self.sources.push(ManagedSource {
@@ -132,6 +146,7 @@ impl App {
                 base_url,
                 query,
                 tx: wtx,
+                tls,
             },
         });
     }
