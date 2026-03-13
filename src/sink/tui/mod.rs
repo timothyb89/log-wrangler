@@ -8,11 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, EventStream};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use futures::StreamExt;
 use ratatui::backend::CrosstermBackend;
 
 use crate::filter::Filter;
@@ -259,23 +258,42 @@ pub(crate) async fn run_tui(
     let mut terminal = ratatui::Terminal::new(backend)?;
 
     let mut app = App::new(arena, sources, ingest_tx, next_source_id);
-    let mut event_stream = EventStream::new();
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
 
+    // Use a dedicated thread for reading crossterm events instead of EventStream.
+    // EventStream has a known mutex contention issue: its background thread holds
+    // the global INTERNAL_EVENT_READER lock during blocking poll(), causing
+    // poll_next() to fail its 0ms try_lock.
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        loop {
+            match crossterm::event::read() {
+                Ok(event) => {
+                    if event_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
     loop {
+        app.update_from_arena();
         terminal.draw(|frame| app.render(frame))?;
 
         tokio::select! {
-            maybe_event = event_stream.next() => {
-                match maybe_event {
-                    Some(Ok(event)) => app.handle_event(event),
-                    Some(Err(_)) => break,
-                    None => break,
+            biased;
+
+            Some(event) = event_rx.recv() => {
+                app.handle_event(event);
+
+                // Drain any additional queued events.
+                while let Ok(event) = event_rx.try_recv() {
+                    app.handle_event(event);
                 }
             }
-            _ = tick_interval.tick() => {
-                app.update_from_arena();
-            }
+            _ = tick_interval.tick() => {}
         }
 
         if app.should_quit {

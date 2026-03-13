@@ -14,15 +14,12 @@ struct LogCliEntry {
     timestamp: String,
 }
 
-/// Read JSONL log entries from stdin and send them as RawLogs.
+/// Read JSONL log entries from a buffered reader and send them as RawLogs.
 ///
 /// Each line is tried as logcli-format JSON (`{"labels":..., "line":..., "timestamp":...}`).
 /// Lines that fail to parse as JSON are treated as plain text with the current
 /// timestamp and no labels.
-pub fn read_stdin(tx: mpsc::Sender<SourceMessage>, source_id: u16) {
-    let stdin = std::io::stdin();
-    let reader = stdin.lock();
-
+pub fn read_stdin(tx: mpsc::Sender<SourceMessage>, source_id: u16, reader: impl BufRead) {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,

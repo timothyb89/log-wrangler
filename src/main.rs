@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::IsTerminal;
 use std::sync::mpsc;
 
 use clap::Parser;
@@ -123,15 +122,12 @@ async fn main() -> Result<()> {
                     name: src.name,
                     kind: sink::tui::ManagedSourceKind::Stdin,
                 });
-                // Spawn stdin reader only when stdin is piped (not a TTY).
-                // When stdin is a TTY, crossterm needs exclusive access for keyboard events.
-                if !std::io::stdin().is_terminal() {
-                    let tx_stdin = tx.clone();
-                    let sid = src.id;
-                    std::thread::spawn(move || {
-                        source::stdin::read_stdin(tx_stdin, sid);
-                    });
-                }
+                let tx_stdin = tx.clone();
+                let sid = src.id;
+                std::thread::spawn(move || {
+                    let stdin = std::io::stdin();
+                    source::stdin::read_stdin(tx_stdin, sid, stdin.lock());
+                });
             }
             SourceConfig::GrafanaLoki { base_url } => {
                 let query = named_queries
