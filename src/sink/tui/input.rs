@@ -3,7 +3,7 @@ use crossterm::event::{
 };
 
 use super::action::{Action, COMMAND_REGISTRY};
-use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
+use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogMode, SourceDialogSourceType, SourceDialogState, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -198,6 +198,28 @@ impl App {
                 self.scroll = ScrollState::Tail;
                 self.h_scroll = 0;
                 self.v_scroll = 0;
+            }
+            Action::AddSourceLoki => {
+                self.overlay = OverlayMode::SourceDialog(SourceDialogState {
+                    mode: SourceDialogMode::Add,
+                    source_type: SourceDialogSourceType::Loki,
+                    fields: [String::new(), String::new(), String::new()],
+                    cursors: [0, 0, 0],
+                    active_field: 1,
+                    error: None,
+                    tls: None,
+                });
+            }
+            Action::AddSourceSubcommand => {
+                self.overlay = OverlayMode::SourceDialog(SourceDialogState {
+                    mode: SourceDialogMode::Add,
+                    source_type: SourceDialogSourceType::Subcommand,
+                    fields: [String::new(), String::new(), String::new()],
+                    cursors: [0, 0, 0],
+                    active_field: 1,
+                    error: None,
+                    tls: None,
+                });
             }
             Action::OpenCommandPalette => {
                 self.overlay = OverlayMode::CommandPalette(CommandPaletteState::new());

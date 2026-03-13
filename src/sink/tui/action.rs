@@ -22,6 +22,8 @@ pub(super) enum Action {
     ClearSearch,
     ScrollToTop,
     ScrollToBottom,
+    AddSourceLoki,
+    AddSourceSubcommand,
     OpenCommandPalette,
 }
 
@@ -53,5 +55,7 @@ pub(super) const COMMAND_REGISTRY: &[CommandEntry] = &[
     CommandEntry { action: Action::ClearSearch,          name: "Clear search",               hint: "Esc" },
     CommandEntry { action: Action::ScrollToTop,          name: "Scroll to top",              hint: "g" },
     CommandEntry { action: Action::ScrollToBottom,       name: "Scroll to bottom (tail)",    hint: "G" },
-    CommandEntry { action: Action::Quit,                 name: "Quit",                       hint: "q" },
+    CommandEntry { action: Action::AddSourceLoki,         name: "Add source: Loki",            hint: "" },
+    CommandEntry { action: Action::AddSourceSubcommand,  name: "Add source: Subcommand",      hint: "" },
+    CommandEntry { action: Action::Quit,                 name: "Quit",                        hint: "q" },
 ];
