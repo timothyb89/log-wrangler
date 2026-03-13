@@ -11,6 +11,7 @@ use crate::filter::FilterMode;
 use crate::log::{Arena, LogView};
 use crate::util::INTERNAL_SOURCE_ID;
 
+use super::action::COMMAND_REGISTRY;
 use super::filter::entry_matches_filter;
 use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
@@ -72,6 +73,9 @@ impl App {
             }
             OverlayMode::SourceDialog(_) => {
                 self.render_source_dialog(frame, frame.area());
+            }
+            OverlayMode::CommandPalette(_) => {
+                self.render_command_palette(frame, frame.area());
             }
             OverlayMode::None => {}
         }
@@ -1101,6 +1105,72 @@ impl App {
         if let Some((cx, cy)) = cursor_pos {
             frame.set_cursor_position((cx, cy));
         }
+    }
+
+    fn render_command_palette(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let state = match &mut self.overlay {
+            OverlayMode::CommandPalette(s) => s,
+            _ => return,
+        };
+
+        let filtered = state.filtered_indices();
+
+        // Height: 3 for input box (border + input + border) + items + 2 for list borders.
+        let list_height = (filtered.len() as u16).min(area.height.saturating_sub(7));
+        let dialog_height = 3 + list_height + 2;
+        let popup_area = centered_rect_fixed(60, dialog_height, area);
+        frame.render_widget(Clear, popup_area);
+
+        let chunks = Layout::vertical([
+            Constraint::Length(3), // input
+            Constraint::Min(1),   // command list
+        ])
+        .split(popup_area);
+
+        // Store list area for mouse hit-testing.
+        state.list_area = chunks[1];
+
+        // Input field.
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Command Palette ");
+        let input_paragraph = Paragraph::new(state.input.as_str()).block(input_block);
+        frame.render_widget(input_paragraph, chunks[0]);
+
+        // Cursor in input field.
+        let cursor_x = chunks[0].x + 1 + state.cursor as u16;
+        let cursor_y = chunks[0].y + 1;
+        frame.set_cursor_position((cursor_x, cursor_y));
+
+        // Command list.
+        let items: Vec<ListItem> = filtered
+            .iter()
+            .map(|&idx| {
+                let entry = &COMMAND_REGISTRY[idx];
+                let line = Line::from(vec![
+                    Span::raw(entry.name),
+                    Span::styled(
+                        format!("  {}", entry.hint),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]);
+                ListItem::new(line)
+            })
+            .collect();
+
+        let selected = state.selected.min(filtered.len().saturating_sub(1));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title_bottom(" ↑↓ : navigate   Enter : run   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol("> ");
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected));
+        frame.render_stateful_widget(list, chunks[1], &mut list_state);
     }
 }
 

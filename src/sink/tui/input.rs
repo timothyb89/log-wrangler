@@ -2,7 +2,8 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
-use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
+use super::action::{Action, COMMAND_REGISTRY};
+use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -24,6 +25,10 @@ impl App {
                         self.handle_source_dialog_key(key.code, key.modifiers);
                         return;
                     }
+                    OverlayMode::CommandPalette(_) => {
+                        self.handle_command_palette_key(key.code, key.modifiers);
+                        return;
+                    }
                     OverlayMode::None => {}
                 }
                 match self.toolbar_mode {
@@ -32,7 +37,44 @@ impl App {
                     ToolbarMode::SearchEntry => self.handle_search_key(key.code, key.modifiers),
                 }
             }
-            Event::Mouse(mouse) => match mouse.kind {
+            Event::Mouse(mouse) => {
+                // Route mouse events to command palette when open.
+                if let OverlayMode::CommandPalette(ref mut state) = self.overlay {
+                    let max = state.filtered_indices().len();
+                    match mouse.kind {
+                        MouseEventKind::ScrollDown => {
+                            state.selected = (state.selected + 1).min(max.saturating_sub(1));
+                        }
+                        MouseEventKind::ScrollUp => {
+                            state.selected = state.selected.saturating_sub(1);
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let area = state.list_area;
+                            // Click inside the list area (excluding borders).
+                            if mouse.row > area.y
+                                && mouse.row < area.y + area.height.saturating_sub(1)
+                                && mouse.column >= area.x
+                                && mouse.column < area.x + area.width
+                            {
+                                let clicked = (mouse.row - area.y - 1) as usize;
+                                if clicked < max {
+                                    state.selected = clicked;
+                                    // Double-purpose: select and execute.
+                                    let indices = state.filtered_indices();
+                                    if let Some(&reg_idx) = indices.get(clicked) {
+                                        let action = COMMAND_REGISTRY[reg_idx].action;
+                                        self.overlay = OverlayMode::None;
+                                        self.dispatch_action(action);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                    return;
+                }
+
+                match mouse.kind {
                 MouseEventKind::ScrollDown if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
                     self.scroll_proportional_down(2);
                 }
@@ -55,16 +97,16 @@ impl App {
                     }
                 }
                 _ => {}
-            },
+                }
+            }
             _ => {}
         }
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
         match (code, modifiers) {
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) | (KeyCode::Char('q'), _) => {
-                self.should_quit = true;
-            }
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.dispatch_action(Action::Quit),
+            (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.dispatch_action(Action::OpenCommandPalette),
             (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::SHIFT) => {
                 self.scroll_proportional_down(10);
             }
@@ -73,18 +115,8 @@ impl App {
             }
             (KeyCode::Down | KeyCode::Char('j'), _) => self.scroll_down(),
             (KeyCode::Up | KeyCode::Char('k'), _) => self.scroll_up(),
-            (KeyCode::Char('G') | KeyCode::End, _) => {
-                self.scroll = ScrollState::Tail;
-                self.h_scroll = 0;
-                self.v_scroll = 0;
-            }
-            (KeyCode::Char('g') | KeyCode::Home, _) => {
-                if self.current_entry_count > 0 {
-                    self.scroll = ScrollState::Selected(0);
-                    self.h_scroll = 0;
-                    self.v_scroll = 0;
-                }
-            }
+            (KeyCode::Char('G') | KeyCode::End, _) => self.dispatch_action(Action::ScrollToBottom),
+            (KeyCode::Char('g') | KeyCode::Home, _) => self.dispatch_action(Action::ScrollToTop),
             (KeyCode::Right | KeyCode::Char('l'), _) => {
                 self.h_scroll = self.h_scroll.saturating_add(8);
             }
@@ -93,54 +125,83 @@ impl App {
             }
             (KeyCode::PageDown, _) => self.scroll_page_down(),
             (KeyCode::PageUp, _) => self.scroll_page_up(),
-            (KeyCode::Char('/'), _) => {
+            (KeyCode::Char('/'), _) => self.dispatch_action(Action::EnterFilterMode),
+            (KeyCode::Backspace, _) => self.dispatch_action(Action::PopFilter),
+            (KeyCode::Char('p'), _) => self.dispatch_action(Action::PopAndRemoveFilter),
+            (KeyCode::Char('['), _) => self.dispatch_action(Action::NavigateSiblingPrev),
+            (KeyCode::Char(']'), _) => self.dispatch_action(Action::NavigateSiblingNext),
+            (KeyCode::Tab, _) => self.dispatch_action(Action::OpenTreeSelect),
+            (KeyCode::Char('?'), _) => self.dispatch_action(Action::EnterSearchMode),
+            (KeyCode::Char('n'), KeyModifiers::NONE) => self.dispatch_action(Action::SearchNext),
+            (KeyCode::Char('N'), _) => self.dispatch_action(Action::SearchPrev),
+            (KeyCode::Esc, _) => self.dispatch_action(Action::ClearSearch),
+            (KeyCode::Char('v'), _) => self.dispatch_action(Action::ToggleDisplayMode),
+            (KeyCode::Char('t'), _) => self.dispatch_action(Action::ToggleTimezone),
+            (KeyCode::Char('s'), _) => self.dispatch_action(Action::OpenSourceSelect),
+            (KeyCode::Char('>'), _) => self.dispatch_action(Action::TimeFilterAfter),
+            (KeyCode::Char('<'), _) => self.dispatch_action(Action::TimeFilterBefore),
+            (KeyCode::Char('q'), _) => self.dispatch_action(Action::Quit),
+            _ => {}
+        }
+    }
+
+    fn dispatch_action(&mut self, action: Action) {
+        match action {
+            Action::Quit => {
+                self.should_quit = true;
+            }
+            Action::EnterFilterMode => {
                 self.toolbar_mode = ToolbarMode::FilterEntry;
                 self.filter_input.clear();
                 self.filter_cursor = 0;
                 self.filter_inverted = false;
             }
-            (KeyCode::Backspace, _) => self.pop_filter(),
-            (KeyCode::Char('p'), _) => self.pop_and_remove_filter(),
-            (KeyCode::Char('['), _) => self.navigate_sibling(-1),
-            (KeyCode::Char(']'), _) => self.navigate_sibling(1),
-            (KeyCode::Tab, _) => self.enter_tree_select(),
-            (KeyCode::Char('?'), _) => {
+            Action::EnterSearchMode => {
                 self.toolbar_mode = ToolbarMode::SearchEntry;
                 self.filter_input.clear();
                 self.filter_cursor = 0;
                 self.filter_inverted = false;
             }
-            (KeyCode::Char('n'), KeyModifiers::NONE) => {
-                self.jump_to_search_match(Direction::Forward);
-            }
-            (KeyCode::Char('N'), _) => {
-                self.jump_to_search_match(Direction::Backward);
-            }
-            (KeyCode::Esc, _) => {
-                self.search = None;
-            }
-            (KeyCode::Char('v'), _) => {
+            Action::PopFilter => self.pop_filter(),
+            Action::PopAndRemoveFilter => self.pop_and_remove_filter(),
+            Action::NavigateSiblingPrev => self.navigate_sibling(-1),
+            Action::NavigateSiblingNext => self.navigate_sibling(1),
+            Action::OpenTreeSelect => self.enter_tree_select(),
+            Action::OpenSourceSelect => self.enter_source_select(),
+            Action::ToggleDisplayMode => {
                 self.display_mode = match self.display_mode {
                     DisplayMode::Raw => DisplayMode::Pretty,
                     DisplayMode::Pretty => DisplayMode::Raw,
                 };
             }
-            (KeyCode::Char('t'), _) => {
+            Action::ToggleTimezone => {
                 self.timezone_mode = match self.timezone_mode {
                     TimezoneMode::Local => TimezoneMode::Utc,
                     TimezoneMode::Utc => TimezoneMode::Local,
                 };
             }
-            (KeyCode::Char('s'), _) => {
-                self.enter_source_select();
+            Action::TimeFilterAfter => self.apply_time_filter(true),
+            Action::TimeFilterBefore => self.apply_time_filter(false),
+            Action::SearchNext => self.jump_to_search_match(Direction::Forward),
+            Action::SearchPrev => self.jump_to_search_match(Direction::Backward),
+            Action::ClearSearch => {
+                self.search = None;
             }
-            (KeyCode::Char('>'), _) => {
-                self.apply_time_filter(true);
+            Action::ScrollToTop => {
+                if self.current_entry_count > 0 {
+                    self.scroll = ScrollState::Selected(0);
+                    self.h_scroll = 0;
+                    self.v_scroll = 0;
+                }
             }
-            (KeyCode::Char('<'), _) => {
-                self.apply_time_filter(false);
+            Action::ScrollToBottom => {
+                self.scroll = ScrollState::Tail;
+                self.h_scroll = 0;
+                self.v_scroll = 0;
             }
-            _ => {}
+            Action::OpenCommandPalette => {
+                self.overlay = OverlayMode::CommandPalette(CommandPaletteState::new());
+            }
         }
     }
 
@@ -347,6 +408,100 @@ impl App {
                 let f = state.active_field;
                 state.fields[f].insert(state.cursors[f], c);
                 state.cursors[f] += 1;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_command_palette_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Esc, _) => {
+                self.overlay = OverlayMode::None;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.selected = state.selected.saturating_sub(1);
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                let max = state.filtered_indices().len().saturating_sub(1);
+                state.selected = (state.selected + 1).min(max);
+            }
+            (KeyCode::Enter, _) => {
+                let state = match &self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                let indices = state.filtered_indices();
+                if let Some(&reg_idx) = indices.get(state.selected) {
+                    let action = COMMAND_REGISTRY[reg_idx].action;
+                    self.overlay = OverlayMode::None;
+                    self.dispatch_action(action);
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                    state.input.remove(state.cursor);
+                    state.selected = 0;
+                }
+            }
+            (KeyCode::Delete, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                if state.cursor < state.input.len() {
+                    state.input.remove(state.cursor);
+                    state.selected = 0;
+                }
+            }
+            (KeyCode::Left, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            (KeyCode::Right, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.cursor = (state.cursor + 1).min(state.input.len());
+            }
+            (KeyCode::Home, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.cursor = 0;
+            }
+            (KeyCode::End, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.input.len();
+            }
+            (KeyCode::Char(c), _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::CommandPalette(s) => s,
+                    _ => return,
+                };
+                state.input.insert(state.cursor, c);
+                state.cursor += 1;
+                state.selected = 0;
             }
             _ => {}
         }

@@ -1,3 +1,4 @@
+mod action;
 mod filter;
 mod input;
 mod render;
@@ -76,6 +77,46 @@ enum OverlayMode {
     TreeSelect { cursor: usize },
     SourceSelect { cursor: usize },
     SourceDialog(SourceDialogState),
+    CommandPalette(CommandPaletteState),
+}
+
+/// State for the command palette overlay.
+struct CommandPaletteState {
+    /// Text buffer for the search input.
+    input: String,
+    /// Cursor position within the input.
+    cursor: usize,
+    /// Index of the selected item in the filtered results list.
+    selected: usize,
+    /// List area from the last render, used for mouse click hit-testing.
+    list_area: ratatui::layout::Rect,
+}
+
+impl CommandPaletteState {
+    fn new() -> Self {
+        Self {
+            input: String::new(),
+            cursor: 0,
+            selected: 0,
+            list_area: ratatui::layout::Rect::default(),
+        }
+    }
+
+    /// Return indices into `COMMAND_REGISTRY` that match the current input
+    /// (case-insensitive substring match).
+    fn filtered_indices(&self) -> Vec<usize> {
+        let registry = action::COMMAND_REGISTRY;
+        if self.input.is_empty() {
+            return (0..registry.len()).collect();
+        }
+        let query = self.input.to_lowercase();
+        registry
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.name.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect()
+    }
 }
 
 /// Which kind of source the add-source dialog is creating.
