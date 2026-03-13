@@ -888,7 +888,7 @@ impl App {
 
         let mut flat: Vec<(super::ViewPath, String)> = Vec::new();
         let mut path: super::ViewPath = Vec::new();
-        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names);
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
 
         let popup_area = centered_rect(72, 65, area);
         frame.render_widget(Clear, popup_area);

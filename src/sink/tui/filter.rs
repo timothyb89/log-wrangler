@@ -397,11 +397,11 @@ impl App {
         let reference_ts = if let ScrollState::Selected(view_idx) = &self.scroll {
             let view = arena.view_at(&self.view_path);
             let clamped = (*view_idx).min(view.entries.len().saturating_sub(1));
-            view.entries.get(clamped).map(|&idx| arena.entries[idx].timestamp.clone())
+            view.entries.get(clamped).map(|&idx| arena.entries[idx].timestamp.timestamp())
         } else {
             None
         };
-        let reference_ts = reference_ts.unwrap_or_else(jiff::Zoned::now);
+        let reference_ts = reference_ts.unwrap_or_else(jiff::Timestamp::now);
 
         let target = if keep_after {
             FilterTarget::After(reference_ts)
@@ -566,10 +566,10 @@ pub(super) fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Fil
             };
         }
         crate::filter::FilterTarget::After(ts) => {
-            return entry.timestamp >= *ts;
+            return entry.timestamp.timestamp() >= *ts;
         }
         crate::filter::FilterTarget::Before(ts) => {
-            return entry.timestamp <= *ts;
+            return entry.timestamp.timestamp() <= *ts;
         }
     };
 

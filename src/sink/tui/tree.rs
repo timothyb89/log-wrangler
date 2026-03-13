@@ -3,14 +3,14 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::filter::{FilterMode, FilterTarget};
 use crate::log::{LogView, ViewPath};
 
-use super::{App, ManagedSourceKind, OverlayMode};
+use super::{App, ManagedSourceKind, OverlayMode, TimezoneMode};
 
 impl App {
     pub(super) fn enter_tree_select(&mut self) {
         let Ok(arena) = self.arena.lock() else { return };
         let mut flat: Vec<(ViewPath, String)> = Vec::new();
         let mut path: ViewPath = Vec::new();
-        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names);
+        Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
         let cursor = flat.iter().position(|(p, _)| *p == self.view_path).unwrap_or(0);
         self.overlay = OverlayMode::TreeSelect { cursor };
     }
@@ -31,7 +31,7 @@ impl App {
                 let Ok(arena) = self.arena.lock() else { return };
                 let mut flat: Vec<(ViewPath, String)> = Vec::new();
                 let mut path: ViewPath = Vec::new();
-                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names);
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
                 self.overlay = OverlayMode::TreeSelect {
                     cursor: (cursor + 1).min(flat.len().saturating_sub(1)),
                 };
@@ -40,7 +40,7 @@ impl App {
                 let Ok(arena) = self.arena.lock() else { return };
                 let mut flat: Vec<(ViewPath, String)> = Vec::new();
                 let mut path: ViewPath = Vec::new();
-                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names);
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
                 if let Some((selected_path, _)) = flat.get(cursor) {
                     if *selected_path != self.view_path {
                         let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
@@ -167,6 +167,7 @@ impl App {
         has_more: &[bool],
         out: &mut Vec<(ViewPath, String)>,
         source_names: &[String],
+        tz_mode: TimezoneMode,
     ) {
         let label = if depth == 0 {
             format!("/ root  ({} entries)", view.entries.len())
@@ -190,11 +191,19 @@ impl App {
                     }
                     // Display time filters with direction and timestamp.
                     if let FilterTarget::After(ts) = &f.target {
-                        let formatted = format!("{}", ts.strftime("%H:%M:%S%.3f"));
+                        let tz = match tz_mode {
+                            TimezoneMode::Local => jiff::tz::TimeZone::system(),
+                            TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
+                        };
+                        let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
                         return format!(">= {}", formatted);
                     }
                     if let FilterTarget::Before(ts) = &f.target {
-                        let formatted = format!("{}", ts.strftime("%H:%M:%S%.3f"));
+                        let tz = match tz_mode {
+                            TimezoneMode::Local => jiff::tz::TimeZone::system(),
+                            TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
+                        };
+                        let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
                         return format!("<= {}", formatted);
                     }
                     let prefix = if f.inverted { "!" } else { "" };
@@ -215,7 +224,7 @@ impl App {
             path.push(i);
             let mut next_has_more = has_more.to_vec();
             next_has_more.push(i < n - 1);
-            Self::flatten_view_tree(child, path, depth + 1, &next_has_more, out, source_names);
+            Self::flatten_view_tree(child, path, depth + 1, &next_has_more, out, source_names, tz_mode);
             path.pop();
         }
     }

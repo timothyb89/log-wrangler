@@ -39,10 +39,10 @@ pub(crate) enum FilterTarget {
     Any,
     /// Match entries from a specific source by ID.
     Source(u16),
-    /// Match entries with timestamp >= the given time.
-    After(jiff::Zoned),
-    /// Match entries with timestamp <= the given time.
-    Before(jiff::Zoned),
+    /// Match entries with timestamp >= the given instant.
+    After(jiff::Timestamp),
+    /// Match entries with timestamp <= the given instant.
+    Before(jiff::Timestamp),
 }
 
 /// A single filter predicate.

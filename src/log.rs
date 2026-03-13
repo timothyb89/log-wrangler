@@ -258,10 +258,10 @@ impl LogView {
                     if filter.inverted { !matches } else { matches }
                 }
                 crate::filter::FilterTarget::After(ts) => {
-                    entry.timestamp >= *ts
+                    entry.timestamp.timestamp() >= *ts
                 }
                 crate::filter::FilterTarget::Before(ts) => {
-                    entry.timestamp <= *ts
+                    entry.timestamp.timestamp() <= *ts
                 }
             };
 
