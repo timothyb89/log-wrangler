@@ -12,6 +12,29 @@ fn json_value_to_string(v: &Value) -> String {
     }
 }
 
+/// Decode a journald MESSAGE value.
+///
+/// journald stores messages that contain embedded newlines or non-UTF-8 bytes
+/// as a JSON array of raw byte values rather than a JSON string. Decode that
+/// byte array back to a UTF-8 string so callers see the original text,
+/// including embedded newlines and leading whitespace (e.g. indented
+/// stacktraces).  Falls back to `json_value_to_string` for plain strings and
+/// other value types.
+fn journald_message_to_string(v: &Value) -> String {
+    if let Value::Array(arr) = v {
+        let bytes: Option<Vec<u8>> = arr
+            .iter()
+            .map(|item| item.as_u64().and_then(|n| u8::try_from(n).ok()))
+            .collect();
+        if let Some(b) = bytes {
+            if let Ok(s) = String::from_utf8(b) {
+                return s;
+            }
+        }
+    }
+    json_value_to_string(v)
+}
+
 /// A configurable classifier for flat JSON log formats. Tries to parse the
 /// input as a JSON object and extracts level, message, and structured fields
 /// using the configured key name lists.
@@ -147,8 +170,9 @@ impl Classifier for JournaldJsonClassifier {
         };
 
         // Require MESSAGE — the distinguishing field for journald JSON.
+        // MESSAGE may be a byte array when it contains embedded newlines.
         let message = match map.get("MESSAGE") {
-            Some(v) => json_value_to_string(v),
+            Some(v) => journald_message_to_string(v),
             None => return false,
         };
         out.message = Some(message);

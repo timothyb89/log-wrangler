@@ -4,6 +4,101 @@ use regex::Regex;
 
 use super::{Classifier, ParseOutput};
 
+/// Classifier for the default `journalctl` plaintext output format:
+/// `MMM [D]D HH:MM:SS hostname unit[pid]: message`
+///
+/// Parses the syslog-style timestamp into a `jiff::Zoned` using the system
+/// timezone (syslog timestamps are local time). Emits `hostname`, `unit`, and
+/// optionally `pid` as structured fields. Sets `message` to the text after the
+/// colon so an enclosing `Encapsulating` wrapper can further classify it.
+pub struct SystemdClassifier;
+
+fn parse_syslog_month(s: &str) -> Option<i8> {
+    match s {
+        "Jan" => Some(1),
+        "Feb" => Some(2),
+        "Mar" => Some(3),
+        "Apr" => Some(4),
+        "May" => Some(5),
+        "Jun" => Some(6),
+        "Jul" => Some(7),
+        "Aug" => Some(8),
+        "Sep" => Some(9),
+        "Oct" => Some(10),
+        "Nov" => Some(11),
+        "Dec" => Some(12),
+        _ => None,
+    }
+}
+
+fn parse_syslog_timestamp(month_str: &str, day_str: &str, time_str: &str) -> Option<jiff::Zoned> {
+    let month = parse_syslog_month(month_str)?;
+    let day: i8 = day_str.trim().parse().ok()?;
+
+    let mut t = time_str.splitn(3, ':');
+    let hour: i8 = t.next()?.parse().ok()?;
+    let minute: i8 = t.next()?.parse().ok()?;
+    let second: i8 = t.next()?.parse().ok()?;
+
+    // Syslog format has no year. If the logged month is ahead of the current
+    // month the entry is almost certainly from the previous year.
+    let now = jiff::Zoned::now();
+    let year = if month > now.month() {
+        now.year() - 1
+    } else {
+        now.year()
+    };
+
+    let date = jiff::civil::Date::new(year, month, day).ok()?;
+    let time = jiff::civil::Time::new(hour, minute, second, 0).ok()?;
+    let dt = date.to_datetime(time);
+    dt.to_zoned(jiff::tz::TimeZone::system()).ok()
+}
+
+impl Classifier for SystemdClassifier {
+    fn name(&self) -> &'static str {
+        "systemd"
+    }
+
+    fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
+        static RE: OnceLock<Regex> = OnceLock::new();
+        let re = RE.get_or_init(|| {
+            // Groups: (1)month (2)day (3)HH:MM:SS (4)hostname (5)unit (6)pid? (7)message
+            Regex::new(
+                r"^(\w{3})\s+(\d{1,2})\s+(\d{2}:\d{2}:\d{2})\s+(\S+)\s+([^\[:\s][^:]*?)(?:\[(\d+)\])?:\s*(.*)",
+            )
+            .unwrap()
+        });
+
+        let caps = match re.captures(input) {
+            Some(c) => c,
+            None => return false,
+        };
+
+        out.timestamp = parse_syslog_timestamp(
+            caps.get(1).map_or("", |m| m.as_str()),
+            caps.get(2).map_or("", |m| m.as_str()),
+            caps.get(3).map_or("", |m| m.as_str()),
+        );
+
+        if let Some(m) = caps.get(4) {
+            out.fields.push(("hostname".to_string(), m.as_str().to_string()));
+        }
+        if let Some(m) = caps.get(5) {
+            let unit = m.as_str().trim();
+            if !unit.is_empty() {
+                out.fields.push(("unit".to_string(), unit.to_string()));
+            }
+        }
+        if let Some(m) = caps.get(6) {
+            out.fields.push(("pid".to_string(), m.as_str().to_string()));
+        }
+
+        out.message = Some(caps.get(7).map_or("", |m| m.as_str()).to_string());
+        true
+    }
+}
+
 /// Heuristic classifier for plaintext log lines. Scans the first 200 bytes for
 /// a recognizable log level keyword. Does not extract a message (the whole line
 /// is used as-is) or a timestamp (the outer source timestamp is kept).

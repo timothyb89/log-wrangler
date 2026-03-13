@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
     // Spawn the ingest thread (blocking, uses std mpsc).
     let arena_clone = arena.clone();
     let reorder_buffer = args.reorder_buffer;
-    let default_chain = format::ClassifierChain::new(vec![Box::new(format::json::default())]);
+    let default_chain = default_auto_chain();
     std::thread::spawn(move || {
         log::ingest(rx, arena_clone, reorder_buffer, classifiers, default_chain);
     });
@@ -251,7 +251,16 @@ fn build_classifier_chain(
             format::ClassifierChain::new(vec![Box::new(format::json::rust_tracing())])
         }
         Some("journald-json") => {
-            format::ClassifierChain::new(vec![Box::new(format::json::journald_json())])
+            format::ClassifierChain::new(vec![Box::new(format::Encapsulating {
+                outer: Box::new(format::json::journald_json()),
+                inner: Box::new(format::json::default()),
+            })])
+        }
+        Some("systemd") => {
+            format::ClassifierChain::new(vec![Box::new(format::Encapsulating {
+                outer: Box::new(format::plaintext::SystemdClassifier),
+                inner: Box::new(format::json::default()),
+            })])
         }
         Some("generic") => {
             format::ClassifierChain::new(vec![Box::new(format::plaintext::GenericClassifier)])
@@ -264,14 +273,28 @@ fn build_classifier_chain(
                     ]),
                     Err(e) => {
                         eprintln!("Warning: invalid --format-regex pattern: {e}");
-                        format::ClassifierChain::new(vec![Box::new(format::json::default())])
+                        default_auto_chain()
                     }
                 }
             } else {
                 eprintln!("Warning: format=regex requires --format-regex");
-                format::ClassifierChain::new(vec![Box::new(format::json::default())])
+                default_auto_chain()
             }
         }
-        _ => format::ClassifierChain::new(vec![Box::new(format::json::default())]),
+        _ => default_auto_chain(),
     }
+}
+
+/// Default classifier chain used when no explicit format hint is given.
+/// Tries journald JSON first (strict: requires the `MESSAGE` key), then falls
+/// back to generic JSON. The `last_hit` cache means a stable-format stream
+/// pays at most one extra classification attempt on the very first message.
+fn default_auto_chain() -> format::ClassifierChain {
+    format::ClassifierChain::new(vec![
+        Box::new(format::Encapsulating {
+            outer: Box::new(format::json::journald_json()),
+            inner: Box::new(format::json::default()),
+        }),
+        Box::new(format::json::default()),
+    ])
 }

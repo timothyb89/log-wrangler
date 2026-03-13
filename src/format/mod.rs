@@ -92,6 +92,58 @@ impl ClassifierChain {
     }
 }
 
+/// Wraps an outer classifier with an inner one that is applied to the extracted
+/// message text. If the inner classifier recognises the message (e.g. it is
+/// itself a JSON log line), its level, structured fields, and inner message
+/// replace or augment the outer classifier's output. This enables transparent
+/// encapsulated log processing: systemd captures a service's JSON output as a
+/// plain text `MESSAGE`; `Encapsulating` re-classifies that text automatically.
+///
+/// `name()` delegates to the outer classifier so `_classifier` still reflects
+/// the outer format (e.g. `journald-json` or `systemd`).
+pub struct Encapsulating {
+    pub outer: Box<dyn Classifier>,
+    pub inner: Box<dyn Classifier>,
+}
+
+impl Classifier for Encapsulating {
+    fn name(&self) -> &'static str {
+        self.outer.name()
+    }
+
+    fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
+        if !self.outer.classify(input, out) {
+            return false;
+        }
+
+        // Nothing to sub-classify if outer produced no message.
+        let message = match out.message.take() {
+            Some(m) => m,
+            None => return true,
+        };
+
+        let mut inner_out = ParseOutput::new();
+        if self.inner.classify(&message, &mut inner_out) {
+            // Inner level is preferred (it's closer to the application); fall
+            // back to whatever the outer classifier found (e.g. PRIORITY).
+            if inner_out.level.is_some() {
+                out.level = inner_out.level;
+            }
+            // Inner message (e.g. the JSON `message` key) wins; outer raw text
+            // is the fallback so the entry always has something to display.
+            out.message = inner_out.message.or(Some(message));
+            out.fields.append(&mut inner_out.fields);
+            if inner_out.timestamp.is_some() {
+                out.timestamp = inner_out.timestamp;
+            }
+        } else {
+            out.message = Some(message);
+        }
+
+        true
+    }
+}
+
 /// Map common level strings to canonical lowercase forms.
 /// Returns the input unchanged for unrecognized values.
 pub fn normalize_level(s: &str) -> &str {
