@@ -16,6 +16,7 @@ fn json_value_to_string(v: &Value) -> String {
 /// input as a JSON object and extracts level, message, and structured fields
 /// using the configured key name lists.
 pub struct JsonClassifier {
+    pub name: &'static str,
     pub level_keys: &'static [&'static str],
     pub message_keys: &'static [&'static str],
     /// Keys to exclude from structured fields (should include level_keys,
@@ -24,6 +25,10 @@ pub struct JsonClassifier {
 }
 
 impl Classifier for JsonClassifier {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
         let map = match serde_json::from_str::<Value>(input) {
             Ok(Value::Object(m)) => m,
@@ -61,6 +66,10 @@ impl Classifier for JsonClassifier {
 pub struct RustTracingClassifier;
 
 impl Classifier for RustTracingClassifier {
+    fn name(&self) -> &'static str {
+        "rust-tracing"
+    }
+
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
         let map = match serde_json::from_str::<Value>(input) {
             Ok(Value::Object(m)) => m,
@@ -127,6 +136,10 @@ fn journald_priority_to_level(priority: &str) -> &'static str {
 }
 
 impl Classifier for JournaldJsonClassifier {
+    fn name(&self) -> &'static str {
+        "journald-json"
+    }
+
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
         let map = match serde_json::from_str::<Value>(input) {
             Ok(Value::Object(m)) => m,
@@ -169,6 +182,7 @@ impl Classifier for JournaldJsonClassifier {
 /// Default JSON classifier: matches the existing log-wrangler behavior.
 pub fn default() -> JsonClassifier {
     JsonClassifier {
+        name: "json",
         level_keys: &["level"],
         message_keys: &["message", "msg"],
         skip_keys: &["level", "message", "msg", "timestamp", "time", "ts"],
@@ -178,6 +192,7 @@ pub fn default() -> JsonClassifier {
 /// Go `slog` JSON format (`{"time":"...","level":"INFO","msg":"...","key":"val"}`).
 pub fn slog() -> JsonClassifier {
     JsonClassifier {
+        name: "slog",
         level_keys: &["level"],
         message_keys: &["msg"],
         skip_keys: &["level", "msg", "time", "source"],

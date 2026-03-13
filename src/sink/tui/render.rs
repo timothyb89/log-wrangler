@@ -425,7 +425,14 @@ impl App {
                 .chain(resolved.structured_fields.iter())
                 .copied()
                 .collect();
-            all_labels.sort_by_key(|(k, _)| *k);
+            // `_`-prefixed keys are internal metadata; sort them after user fields.
+            all_labels.sort_by(|(a, _), (b, _)| {
+                match (a.starts_with('_'), b.starts_with('_')) {
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (false, true) => std::cmp::Ordering::Less,
+                    _ => a.cmp(b),
+                }
+            });
 
             let layout = label_layout(&all_labels, content_width);
             let source_line = if is_selected && show_source { 1 } else { 0 };

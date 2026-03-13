@@ -12,6 +12,8 @@ pub struct ParseOutput {
     pub timestamp: Option<jiff::Zoned>,
     /// Structured key/value fields extracted by the classifier.
     pub fields: Vec<(String, String)>,
+    /// Name of the classifier that matched, set by `ClassifierChain::classify`.
+    pub classifier: Option<&'static str>,
 }
 
 impl ParseOutput {
@@ -21,6 +23,7 @@ impl ParseOutput {
             level: None,
             timestamp: None,
             fields: Vec::new(),
+            classifier: None,
         }
     }
 
@@ -29,6 +32,7 @@ impl ParseOutput {
         self.level = None;
         self.timestamp = None;
         self.fields.clear();
+        self.classifier = None;
     }
 }
 
@@ -37,6 +41,8 @@ impl ParseOutput {
 /// On `false`, the classifier must not have modified `out`.
 pub trait Classifier: Send + Sync {
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool;
+    /// Short identifier written as the `_classifier` structured field on match.
+    fn name(&self) -> &'static str;
 }
 
 /// A chain of classifiers tried in order. The first to return `true` wins.
@@ -65,6 +71,7 @@ impl ClassifierChain {
 
         let start = self.last_hit.get();
         if self.classifiers[start].classify(input, out) {
+            out.classifier = Some(self.classifiers[start].name());
             return true;
         }
         out.clear();
@@ -75,6 +82,7 @@ impl ClassifierChain {
             }
             if classifier.classify(input, out) {
                 self.last_hit.set(i);
+                out.classifier = Some(classifier.name());
                 return true;
             }
             out.clear();

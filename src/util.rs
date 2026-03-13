@@ -71,7 +71,7 @@ impl<S: tracing::Subscriber> Layer<S> for InternalLogLayer {
         });
 
         let mut labels = HashMap::new();
-        labels.insert("source".to_string(), "internal".to_string());
+        labels.insert("_source".to_string(), "internal".to_string());
 
         let raw_log = RawLog {
             timestamp: jiff::Zoned::now(),

@@ -10,6 +10,10 @@ use super::{Classifier, ParseOutput};
 pub struct GenericClassifier;
 
 impl Classifier for GenericClassifier {
+    fn name(&self) -> &'static str {
+        "generic"
+    }
+
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
         static LEVEL_RE: OnceLock<Regex> = OnceLock::new();
         let re = LEVEL_RE.get_or_init(|| {
@@ -37,6 +41,10 @@ pub struct RegexClassifier {
 }
 
 impl Classifier for RegexClassifier {
+    fn name(&self) -> &'static str {
+        "regex"
+    }
+
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {
         let caps = match self.pattern.captures(input) {
             Some(c) => c,

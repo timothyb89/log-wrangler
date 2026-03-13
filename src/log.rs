@@ -318,6 +318,12 @@ fn parse_raw_log(
         let val = rodeo.label_values.get_or_intern(&v);
         sf_pairs.push((key, val));
     }
+
+    if let Some(classifier_name) = out.classifier.take() {
+        let key = rodeo.label_keys.get_or_intern("_classifier");
+        let val = rodeo.label_values.get_or_intern(classifier_name);
+        sf_pairs.push((key, val));
+    }
     // out is now fully consumed; no explicit clear needed.
 
     let message = rodeo.messages.get_or_intern(incoming.message);
