@@ -2,7 +2,7 @@ use crossterm::event::{
     Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 
-use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
+use super::{App, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -131,16 +131,6 @@ impl App {
                     TimezoneMode::Utc => TimezoneMode::Local,
                 };
             }
-            (KeyCode::Char('a'), _) => {
-                self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
-                    mode: super::SourceDialogMode::Add,
-                    fields: [String::new(), String::new(), String::new()],
-                    cursors: [0, 0, 0],
-                    active_field: 1, // start on URL field
-                    error: None,
-                    tls: None,
-                });
-            }
             (KeyCode::Char('s'), _) => {
                 self.enter_source_select();
             }
@@ -250,10 +240,28 @@ impl App {
             _ => return,
         };
 
+        // Ctrl+T toggles source type in Add mode, clearing type-specific fields.
+        if code == KeyCode::Char('t') && modifiers.contains(KeyModifiers::CONTROL) {
+            if matches!(state.mode, super::SourceDialogMode::Add) {
+                state.source_type = match state.source_type {
+                    SourceDialogSourceType::Loki => SourceDialogSourceType::Subcommand,
+                    SourceDialogSourceType::Subcommand => SourceDialogSourceType::Loki,
+                };
+                state.fields[1].clear();
+                state.fields[2].clear();
+                state.cursors[1] = 0;
+                state.cursors[2] = 0;
+                state.error = None;
+                state.active_field = 1;
+            }
+            return;
+        }
+
         // Determine which fields are editable.
-        let editable: &[usize] = match &state.mode {
-            super::SourceDialogMode::Add => &[0, 1, 2],    // name, url, query
-            super::SourceDialogMode::Edit { .. } => &[2],   // query only
+        let editable: &[usize] = match (&state.mode, state.source_type) {
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Loki) => &[0, 1, 2],
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Subcommand) => &[0, 1],
+            (super::SourceDialogMode::Edit { .. }, _) => &[2],
         };
 
         match (code, modifiers) {

@@ -56,6 +56,19 @@ pub struct Args {
     /// Example: `(?P<timestamp>\S+) (?P<level>\w+) (?P<message>.*)`
     #[arg(long)]
     pub format_regex: Option<String>,
+
+    /// Shell command for a subcommand source (repeatable). Format: [name=]<command>
+    ///
+    /// Fills in the command for `subcommand://` sources. A named entry
+    /// (e.g., `--subcommand 'myapp=./server --port 8080'`) matches the source
+    /// with that name. An unnamed entry fills in all subcommand sources that
+    /// have no explicit command.
+    ///
+    /// Examples:
+    ///   --source subcommand://app1 --subcommand 'app1=./server --port 8080'
+    ///   --source subcommand:// --subcommand 'tail -f /var/log/syslog'
+    #[arg(long)]
+    pub subcommand: Vec<String>,
 }
 
 /// Resolve the start time from CLI args.

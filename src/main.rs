@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io::IsTerminal;
 use std::sync::mpsc;
 
 use clap::Parser;
@@ -14,6 +15,7 @@ mod source;
 mod util;
 
 use cli::Args;
+use sink::tui::{ManagedSource, ManagedSourceKind};
 use source::loki::LokiSourceParams;
 use source::teleport::TeleportTlsConfig;
 use source::{NamedQuery, NamedSource, SourceConfig, SourceMessage};
@@ -58,6 +60,29 @@ async fn main() -> Result<()> {
                     ));
                 }
                 default_query = Some(q.query);
+            }
+        }
+    }
+
+    // Parse --subcommand flags into a name→command map, same pattern as --query.
+    let mut named_subcommands: HashMap<String, String> = HashMap::new();
+    let mut default_subcommand: Option<String> = None;
+    for raw in &args.subcommand {
+        let q = source::parse_named_query(raw);
+        match q.name {
+            Some(name) => {
+                if named_subcommands.contains_key(&name) {
+                    return Err(eyre!("Duplicate --subcommand for source '{}'", name));
+                }
+                named_subcommands.insert(name, q.query);
+            }
+            None => {
+                if default_subcommand.is_some() {
+                    return Err(eyre!(
+                        "Multiple unnamed --subcommand flags; use name= prefix to target specific sources"
+                    ));
+                }
+                default_subcommand = Some(q.query);
             }
         }
     }
@@ -117,17 +142,22 @@ async fn main() -> Result<()> {
     for src in sources {
         match src.config {
             SourceConfig::Stdin { .. } => {
-                managed_sources.push(sink::tui::ManagedSource {
+                managed_sources.push(ManagedSource {
                     source_id: src.id,
                     name: src.name,
-                    kind: sink::tui::ManagedSourceKind::Stdin,
+                    kind: ManagedSourceKind::Stdin,
                 });
-                let tx_stdin = tx.clone();
-                let sid = src.id;
-                std::thread::spawn(move || {
-                    let stdin = std::io::stdin();
-                    source::stdin::read_stdin(tx_stdin, sid, stdin.lock());
-                });
+                // Only spawn the stdin reader when stdin is piped. When stdin
+                // is a TTY, reading from it would race with crossterm's event
+                // reader on the same fd, causing dropped keypresses.
+                if !std::io::stdin().is_terminal() {
+                    let tx_stdin = tx.clone();
+                    let sid = src.id;
+                    std::thread::spawn(move || {
+                        let stdin = std::io::stdin();
+                        source::stdin::read_stdin(tx_stdin, sid, stdin.lock());
+                    });
+                }
             }
             SourceConfig::GrafanaLoki { base_url } => {
                 let query = named_queries
@@ -155,10 +185,10 @@ async fn main() -> Result<()> {
 
                 let (wtx, wrx) = tokio::sync::watch::channel(None);
 
-                managed_sources.push(sink::tui::ManagedSource {
+                managed_sources.push(ManagedSource {
                     source_id: src.id,
                     name: src.name,
-                    kind: sink::tui::ManagedSourceKind::Loki {
+                    kind: ManagedSourceKind::Loki {
                         base_url: base_url.clone(),
                         query,
                         tx: wtx,
@@ -205,10 +235,10 @@ async fn main() -> Result<()> {
                 let http_client = tls.http_client.clone();
                 let ws_tls = Some(tls.rustls_config.clone());
 
-                managed_sources.push(sink::tui::ManagedSource {
+                managed_sources.push(ManagedSource {
                     source_id: src.id,
                     name: src.name,
-                    kind: sink::tui::ManagedSourceKind::Loki {
+                    kind: ManagedSourceKind::Loki {
                         base_url: base_url.clone(),
                         query,
                         tx: wtx,
@@ -222,6 +252,29 @@ async fn main() -> Result<()> {
                     base_url, params, tx_loki, wrx, sid,
                     http_client, ws_tls,
                 ));
+            }
+            SourceConfig::Subcommand { command } => {
+                let cmd = command
+                    .or_else(|| named_subcommands.remove(&src.name))
+                    .or_else(|| default_subcommand.clone())
+                    .ok_or_else(|| {
+                        eyre!(
+                            "--subcommand is required for subcommand source '{}'. \
+                             Use --subcommand '{}=<command>' or a bare --subcommand '<command>'",
+                            src.name,
+                            src.name,
+                        )
+                    })?;
+
+                let kill_tx = source::subcommand::run_subcommand_source(
+                    cmd.clone(), tx.clone(), src.id,
+                );
+
+                managed_sources.push(ManagedSource {
+                    source_id: src.id,
+                    name: src.name,
+                    kind: ManagedSourceKind::Subcommand { command: cmd, kill_tx },
+                });
             }
         }
     }
@@ -240,7 +293,9 @@ fn build_classifier_chain(
 ) -> format::ClassifierChain {
     let hint = match config {
         SourceConfig::Stdin { format_hint } => format_hint.as_deref(),
-        _ => None,
+        SourceConfig::Subcommand { .. }
+        | SourceConfig::GrafanaLoki { .. }
+        | SourceConfig::GrafanaLokiTeleport { .. } => None,
     };
 
     match hint {

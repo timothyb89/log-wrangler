@@ -3,7 +3,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use crate::filter::{FilterMode, FilterTarget};
 use crate::log::{LogView, ViewPath};
 
-use super::{App, ManagedSourceKind, OverlayMode, TimezoneMode};
+use super::{App, ManagedSourceKind, OverlayMode, SourceDialogSourceType, TimezoneMode};
 
 impl App {
     pub(super) fn enter_tree_select(&mut self) {
@@ -96,6 +96,7 @@ impl App {
             KeyCode::Char('a') => {
                 self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
                     mode: super::SourceDialogMode::Add,
+                    source_type: SourceDialogSourceType::Loki,
                     fields: [String::new(), String::new(), String::new()],
                     cursors: [0, 0, 0],
                     active_field: 1,
@@ -117,18 +118,34 @@ impl App {
             }
             KeyCode::Char('c') => {
                 if let Some(source) = self.sources.get(cursor) {
-                    if let ManagedSourceKind::Loki { base_url, query, tls, .. } = &source.kind {
-                        let url_str = base_url.to_string();
-                        let query = query.clone();
-                        let tls = tls.clone();
-                        self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
-                            mode: super::SourceDialogMode::Add,
-                            fields: [String::new(), url_str.clone(), query.clone()],
-                            cursors: [0, url_str.len(), query.len()],
-                            active_field: 2,
-                            error: None,
-                            tls,
-                        });
+                    match &source.kind {
+                        ManagedSourceKind::Loki { base_url, query, tls, .. } => {
+                            let url_str = base_url.to_string();
+                            let query = query.clone();
+                            let tls = tls.clone();
+                            self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                                mode: super::SourceDialogMode::Add,
+                                source_type: SourceDialogSourceType::Loki,
+                                fields: [String::new(), url_str.clone(), query.clone()],
+                                cursors: [0, url_str.len(), query.len()],
+                                active_field: 2,
+                                error: None,
+                                tls,
+                            });
+                        }
+                        ManagedSourceKind::Subcommand { command, .. } => {
+                            let command = command.clone();
+                            self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                                mode: super::SourceDialogMode::Add,
+                                source_type: SourceDialogSourceType::Subcommand,
+                                fields: [String::new(), command.clone(), String::new()],
+                                cursors: [0, command.len(), 0],
+                                active_field: 1,
+                                error: None,
+                                tls: None,
+                            });
+                        }
+                        ManagedSourceKind::Stdin => {}
                     }
                 }
             }
@@ -142,19 +159,21 @@ impl App {
         let Some(source) = self.sources.get(source_idx) else {
             return;
         };
-        if let ManagedSourceKind::Loki { query, .. } = &source.kind {
-            self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
-                mode: super::SourceDialogMode::Edit { source_idx },
-                fields: [
-                    source.name.clone(),
-                    String::new(),
-                    query.clone(),
-                ],
-                cursors: [0, 0, query.len()],
-                active_field: 2, // focus on query
-                error: None,
-                tls: None, // edit only changes query; TLS lives in ManagedSourceKind
-            });
+        match &source.kind {
+            ManagedSourceKind::Loki { query, .. } => {
+                let query = query.clone();
+                self.overlay = OverlayMode::SourceDialog(super::SourceDialogState {
+                    mode: super::SourceDialogMode::Edit { source_idx },
+                    source_type: SourceDialogSourceType::Loki,
+                    fields: [source.name.clone(), String::new(), query.clone()],
+                    cursors: [0, 0, query.len()],
+                    active_field: 2,
+                    error: None,
+                    tls: None,
+                });
+            }
+            // Subcommand and Stdin sources don't support in-place editing.
+            _ => {}
         }
     }
 

@@ -3,7 +3,7 @@ use crate::log::{Arena, LogView, ViewPath};
 use crate::source::loki::LokiSourceParams;
 use crate::source::teleport::TeleportTlsConfig;
 
-use super::{App, Direction, FilterEntryMode, ManagedSource, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogMode, ToolbarMode};
+use super::{App, Direction, FilterEntryMode, ManagedSource, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogMode, SourceDialogSourceType, ToolbarMode};
 
 impl App {
     pub(super) fn submit_source_dialog(&mut self) {
@@ -14,6 +14,32 @@ impl App {
 
         match &state.mode {
             SourceDialogMode::Add => {
+                match state.source_type {
+                    SourceDialogSourceType::Subcommand => {
+                        let command = state.fields[1].trim().to_string();
+                        if command.is_empty() {
+                            let state = match &mut self.overlay {
+                                OverlayMode::SourceDialog(s) => s,
+                                _ => return,
+                            };
+                            state.error = Some("Command is required".to_string());
+                            return;
+                        }
+                        let name = {
+                            let n = state.fields[0].trim();
+                            if n.is_empty() {
+                                format!("cmd-{}", self.next_source_id)
+                            } else {
+                                n.to_string()
+                            }
+                        };
+                        self.spawn_subcommand_source(name, command);
+                        self.overlay = OverlayMode::None;
+                        return;
+                    }
+                    SourceDialogSourceType::Loki => {}
+                }
+
                 let url_str = state.fields[1].trim();
                 let query = state.fields[2].trim();
 
@@ -148,6 +174,31 @@ impl App {
                 tx: wtx,
                 tls,
             },
+        });
+    }
+
+    pub(super) fn spawn_subcommand_source(&mut self, name: String, command: String) {
+        let source_id = self.next_source_id;
+        self.next_source_id += 1;
+
+        {
+            let mut arena = self.arena.lock().unwrap();
+            if source_id as usize >= arena.source_names.len() {
+                arena.source_names.resize(source_id as usize + 1, String::new());
+            }
+            arena.source_names[source_id as usize] = name.clone();
+        }
+
+        let kill_tx = crate::source::subcommand::run_subcommand_source(
+            command.clone(),
+            self.ingest_tx.clone(),
+            source_id,
+        );
+
+        self.sources.push(ManagedSource {
+            source_id,
+            name,
+            kind: ManagedSourceKind::Subcommand { command, kill_tx },
         });
     }
 

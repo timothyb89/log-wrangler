@@ -12,7 +12,7 @@ use crate::log::{Arena, LogView};
 use crate::util::INTERNAL_SOURCE_ID;
 
 use super::filter::entry_matches_filter;
-use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
+use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
 /// Expand tab characters to spaces so they render visibly in the TUI.
 ///
@@ -84,9 +84,9 @@ impl App {
         arena: &Arena,
         view: &LogView,
     ) {
-        // Show empty state prompt when no entries and no Loki sources.
+        // Show empty state prompt when no entries and no sources.
         if view.entries.is_empty() && self.sources.is_empty() {
-            let msg = Paragraph::new("No sources configured. Press `a` to add a Loki source.")
+            let msg = Paragraph::new("No sources configured. Press `s` to manage sources.")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(ratatui::layout::Alignment::Center);
             let y = area.y + area.height / 2;
@@ -777,10 +777,7 @@ impl App {
                 if self.search.is_some() {
                     hints.push_str(" n/N:match Esc:clear");
                 }
-                if arena.source_names.len() > 1 {
-                    hints.push_str(" s:sources");
-                }
-                hints.push_str(" >:after <:before a:add v:view t:tz");
+                hints.push_str(" s:sources >:after <:before v:view t:tz");
 
                 let status = format!(
                     " {} | {} | {} | Filters: {} | View: {}/{} entries{} | {}",
@@ -942,13 +939,16 @@ impl App {
             .iter()
             .map(|source| {
                 let count = view.entries.iter().filter(|&&idx| arena.entries[idx].source_id == source.source_id).count();
-                let teleport_badge = match &source.kind {
+                let badge = match &source.kind {
                     ManagedSourceKind::Loki { tls: Some(t), .. } => {
                         format!("  \u{2022}teleport:{}", t.app_name)
                     }
+                    ManagedSourceKind::Subcommand { command, .. } => {
+                        format!("  \u{2022}cmd:{}", command)
+                    }
                     _ => String::new(),
                 };
-                let label = format!("{}{}  ({} entries)", source.name, teleport_badge, count);
+                let label = format!("{}{}  ({} entries)", source.name, badge, count);
                 ListItem::new(label).style(source_style(source.source_id))
             })
             .collect();
@@ -976,19 +976,25 @@ impl App {
         };
 
         let is_add = matches!(state.mode, super::SourceDialogMode::Add);
-        let title = if is_add {
-            " Add Loki Source ".to_string()
-        } else {
-            format!(" Edit: {} ", state.fields[0])
+        let is_subcommand = matches!(state.source_type, SourceDialogSourceType::Subcommand);
+
+        let title = match (&state.mode, state.source_type) {
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Loki) => " Add Source: Loki ".to_string(),
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Subcommand) => " Add Source: Subcommand ".to_string(),
+            (super::SourceDialogMode::Edit { .. }, _) => format!(" Edit: {} ", state.fields[0]),
         };
 
-        // Dialog dimensions: fixed height, centered horizontally.
-        let dialog_height = if is_add { 9 } else { 8 };
+        // Height: add mode gets name + type-toggle hint; subcommand has one fewer field.
+        let dialog_height = match (&state.mode, state.source_type) {
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Loki) => 10,
+            (super::SourceDialogMode::Add, SourceDialogSourceType::Subcommand) => 9,
+            (super::SourceDialogMode::Edit { .. }, _) => 8,
+        };
         let popup_area = centered_rect_fixed(60, dialog_height, area);
         frame.render_widget(Clear, popup_area);
 
         let hint = if is_add {
-            " Tab: next field   Enter: connect   Esc: cancel "
+            " Ctrl+T: toggle type   Tab: next field   Enter: connect   Esc: cancel "
         } else {
             " Enter: apply   Esc: cancel "
         };
@@ -1000,8 +1006,7 @@ impl App {
         let inner = block.inner(popup_area);
         frame.render_widget(block, popup_area);
 
-        // Layout fields vertically inside the inner area.
-        let field_width = inner.width.saturating_sub(10) as usize; // label takes ~8 chars + padding
+        let field_width = inner.width.saturating_sub(10) as usize;
 
         let mut y = inner.y;
         let label_x = inner.x + 2;
@@ -1011,10 +1016,8 @@ impl App {
         let inactive_style = Style::default().fg(Color::Gray);
         let error_style = Style::default().fg(Color::Red);
 
-        // Cursor position (set at end).
         let mut cursor_pos: Option<(u16, u16)> = None;
 
-        // Helper: render one field line.
         let render_field = |frame: &mut Frame,
                             label: &str,
                             value: &str,
@@ -1033,7 +1036,6 @@ impl App {
                 ratatui::layout::Rect::new(label_x, row_y, 10, 1),
             );
 
-            // Horizontal scroll for long values.
             let scroll_offset = if is_active && cursor > field_width.saturating_sub(2) {
                 cursor - field_width.saturating_sub(2)
             } else {
@@ -1050,7 +1052,6 @@ impl App {
             };
 
             if is_editable {
-                // Render with bracket indicators for editable fields.
                 let field_text = format!("{:<width$}", visible, width = field_width);
                 frame.render_widget(
                     Paragraph::new(Line::from(Span::styled(field_text, style))),
@@ -1070,23 +1071,24 @@ impl App {
         };
 
         if is_add {
-            // Name field.
             y += 1;
             render_field(frame, "Name", &state.fields[0], state.cursors[0],
                 state.active_field == 0, true, y, field_width, &mut cursor_pos);
         }
 
-        // URL field (editable in add, read-only in edit).
+        // Second field: URL for Loki, Command for Subcommand.
         y += 1;
-        render_field(frame, "URL", &state.fields[1], state.cursors[1],
+        let second_label = if is_subcommand { "Command" } else { "URL" };
+        render_field(frame, second_label, &state.fields[1], state.cursors[1],
             state.active_field == 1, is_add, y, field_width, &mut cursor_pos);
 
-        // Query field (always editable).
-        y += 1;
-        render_field(frame, "Query", &state.fields[2], state.cursors[2],
-            state.active_field == 2, true, y, field_width, &mut cursor_pos);
+        // Query field: Loki only.
+        if !is_subcommand {
+            y += 1;
+            render_field(frame, "Query", &state.fields[2], state.cursors[2],
+                state.active_field == 2, true, y, field_width, &mut cursor_pos);
+        }
 
-        // Error message.
         if let Some(err) = &state.error {
             y += 2;
             let err_area = ratatui::layout::Rect::new(label_x, y, inner.width.saturating_sub(4), 1);
@@ -1096,7 +1098,6 @@ impl App {
             );
         }
 
-        // Set cursor position for the active field.
         if let Some((cx, cy)) = cursor_pos {
             frame.set_cursor_position((cx, cy));
         }

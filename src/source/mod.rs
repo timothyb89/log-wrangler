@@ -5,6 +5,7 @@ use color_eyre::Result;
 
 pub mod loki;
 pub mod stdin;
+pub mod subcommand;
 pub mod teleport;
 
 pub struct RawLog {
@@ -35,6 +36,15 @@ pub enum SourceConfig {
     /// `app_name` is the Teleport app name; `loki_path` is the path on the
     /// proxied host that serves as the Loki base URL.
     GrafanaLokiTeleport { app_name: String, loki_path: String },
+    /// Run a shell command and ingest its stdout/stderr.
+    ///
+    /// The command may be embedded in the URI via `?cmd=...`, or supplied
+    /// separately via `--subcommand`.
+    Subcommand {
+        /// Shell command to run, if specified in the URI via `?cmd=`.
+        /// `None` when the command will be provided by `--subcommand`.
+        command: Option<String>,
+    },
 }
 
 /// A source with an assigned name and numeric ID.
@@ -95,6 +105,7 @@ pub fn parse_named_source(raw: &str, index: usize) -> Result<NamedSource> {
         SourceConfig::Stdin { .. } => "stdin".to_string(),
         SourceConfig::GrafanaLoki { .. } => format!("loki-{}", index),
         SourceConfig::GrafanaLokiTeleport { app_name, .. } => app_name.clone(),
+        SourceConfig::Subcommand { .. } => format!("cmd-{}", index),
     });
 
     Ok(NamedSource {
@@ -110,6 +121,7 @@ pub fn parse_named_source(raw: &str, index: usize) -> Result<NamedSource> {
 /// - `stdin://` (or `stdin`) — read JSONL from stdin
 /// - `grafana+loki+http://host:port/path` — Grafana Loki datasource proxy
 /// - `grafana+loki+https://host:port/path` — same, over HTTPS
+/// - `subcommand://` — run a shell command; optionally `?cmd=<encoded command>`
 pub fn parse_source_uri(uri: &str) -> Result<SourceConfig> {
     if uri == "stdin" {
         return Ok(SourceConfig::Stdin { format_hint: None });
@@ -150,9 +162,31 @@ pub fn parse_source_uri(uri: &str) -> Result<SourceConfig> {
         return Ok(SourceConfig::GrafanaLoki { base_url: url });
     }
 
+    if uri == "subcommand" || uri.starts_with("subcommand://") {
+        // Extract optional `?cmd=` query parameter. Substitute a real scheme
+        // so the `url` crate can parse the query string (subcommand:// has no
+        // host and the crate rejects bare query-only authority-less URLs).
+        let command = if let Some(rest) = uri.strip_prefix("subcommand://") {
+            if rest.is_empty() {
+                None
+            } else {
+                let proxy = format!("http://localhost/{}", rest);
+                url::Url::parse(&proxy).ok().and_then(|u| {
+                    u.query_pairs()
+                        .find(|(k, _)| k == "cmd")
+                        .map(|(_, v)| v.into_owned())
+                })
+            }
+        } else {
+            None
+        };
+        return Ok(SourceConfig::Subcommand { command });
+    }
+
     Err(eyre!(
         "Unknown source URI scheme: '{}'. \
-         Expected 'stdin://', 'grafana+loki+http://...', or 'grafana+loki+teleport://app-name/path'",
+         Expected 'stdin://', 'grafana+loki+http://...', 'grafana+loki+teleport://app-name/path', \
+         or 'subcommand://'",
         uri
     ))
 }

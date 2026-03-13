@@ -78,14 +78,25 @@ enum OverlayMode {
     SourceDialog(SourceDialogState),
 }
 
+/// Which kind of source the add-source dialog is creating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum SourceDialogSourceType {
+    Loki,
+    Subcommand,
+}
+
 /// State for the add/edit source dialog overlay.
 struct SourceDialogState {
     mode: SourceDialogMode,
-    /// [name, url, query]
+    /// Source type being created (only relevant in Add mode).
+    source_type: SourceDialogSourceType,
+    /// Field storage:
+    ///   Loki:       [name, url, query]
+    ///   Subcommand: [name, command, ""]
     fields: [String; 3],
     /// Cursor position per field.
     cursors: [usize; 3],
-    /// Index of the currently active (focused) field: 0=name, 1=url, 2=query.
+    /// Index of the currently active (focused) field.
     active_field: usize,
     /// Validation error to display, if any.
     error: Option<String>,
@@ -112,6 +123,13 @@ pub(crate) enum ManagedSourceKind {
         /// URI. Carries the mTLS credentials so they can be reused when the
         /// source is cloned or its query is restarted.
         tls: Option<TeleportTlsConfig>,
+    },
+    /// A running child process. Dropping `kill_tx` (or sending on it) kills
+    /// the child.
+    Subcommand {
+        command: String,
+        #[allow(dead_code)]
+        kill_tx: tokio::sync::oneshot::Sender<()>,
     },
 }
 
