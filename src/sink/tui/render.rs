@@ -14,6 +14,27 @@ use crate::util::INTERNAL_SOURCE_ID;
 use super::filter::entry_matches_filter;
 use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, TimezoneMode, ToolbarMode};
 
+/// Expand tab characters to spaces so they render visibly in the TUI.
+///
+/// ratatui treats `\t` as a zero-width control character, so tab-indented
+/// lines (e.g. Go stack trace frames logged through journald) would otherwise
+/// appear to lose their leading whitespace entirely.  A fixed width of 4 is
+/// used since stack trace indentation is always a single leading tab.
+fn expand_tabs(s: &str) -> String {
+    if !s.contains('\t') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if c == '\t' {
+            out.push_str("    ");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn format_timestamp(ts: &jiff::Zoned, mode: TimezoneMode) -> String {
     let converted = match mode {
         TimezoneMode::Local => ts.with_time_zone(jiff::tz::TimeZone::system()),
@@ -414,9 +435,18 @@ impl App {
             let resolved = arena.resolve_entry(arena_idx);
             let is_selected = Some(view_idx) == selected_view_idx;
 
-            let display_msg = resolved.inner_message.unwrap_or(resolved.message);
+            // Suppress raw JSON blobs: if a classifier extracted structured
+            // fields but found no inner message, let the fields speak rather
+            // than falling back to the raw (unreadable) JSON string.
+            let display_msg = resolved.inner_message.unwrap_or_else(|| {
+                if resolved.structured_fields.is_empty() {
+                    resolved.message
+                } else {
+                    ""
+                }
+            });
             let msg_lines: Vec<&str> = display_msg.lines().collect();
-            let msg_line_count = msg_lines.len().max(1);
+            let msg_line_count = if display_msg.is_empty() { 0 } else { msg_lines.len().max(1) };
 
             // Merge logcli labels + structured fields for display, sorted by key.
             let mut all_labels: Vec<(&str, &str)> = resolved
@@ -437,7 +467,7 @@ impl App {
             let layout = label_layout(&all_labels, content_width);
             let source_line = if is_selected && show_source { 1 } else { 0 };
             let label_rows = if is_selected { layout.num_rows } else { 0 };
-            let full_row_height = msg_line_count + source_line + label_rows;
+            let full_row_height = (msg_line_count + source_line + label_rows).max(1);
 
             // Content column.
             let (content, rendered_height) = if is_selected {
@@ -447,10 +477,10 @@ impl App {
                     .enumerate()
                     .map(|(i, l)| {
                         if i == 0 {
-                            let chars: String = l.chars().skip(self.h_scroll).collect();
+                            let chars: String = expand_tabs(l).chars().skip(self.h_scroll).collect();
                             Line::from(chars)
                         } else {
-                            Line::from(l.to_string())
+                            Line::from(expand_tabs(l))
                         }
                     })
                     .collect();
@@ -548,25 +578,25 @@ impl App {
                             label_suffix.push_str(&format!("  {}={}", k, v));
                         }
                         lines.push(Line::from(vec![
-                            Span::raw(l.to_string()),
+                            Span::raw(expand_tabs(l)),
                             Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
                         ]));
                     } else {
-                        lines.push(Line::from(l.to_string()));
+                        lines.push(Line::from(expand_tabs(l)));
                     }
                 }
                 (Cell::from(Text::from(lines)), msg_line_count)
             } else {
                 // Single-line: message + inline abridged labels.
                 let cell = if all_labels.is_empty() {
-                    Cell::from(display_msg)
+                    Cell::from(expand_tabs(display_msg))
                 } else {
                     let mut label_suffix = String::new();
                     for (k, v) in &all_labels {
                         label_suffix.push_str(&format!("  {}={}", k, v));
                     }
                     Cell::from(Line::from(vec![
-                        Span::raw(display_msg.to_string()),
+                        Span::raw(expand_tabs(display_msg)),
                         Span::styled(label_suffix, Style::default().fg(Color::DarkGray)),
                     ]))
                 };
@@ -1145,10 +1175,16 @@ pub(super) fn pretty_row_height(
     content_width: u16,
 ) -> usize {
     let resolved = arena.resolve_entry(arena_idx);
-    let msg = resolved.inner_message.unwrap_or(resolved.message);
-    let msg_lines = msg.lines().count().max(1);
+    let msg = resolved.inner_message.unwrap_or_else(|| {
+        if resolved.structured_fields.is_empty() {
+            resolved.message
+        } else {
+            ""
+        }
+    });
+    let msg_lines = if msg.is_empty() { 0 } else { msg.lines().count().max(1) };
     if !is_selected {
-        return msg_lines;
+        return msg_lines.max(1);
     }
     let all_labels: Vec<(&str, &str)> = resolved
         .labels
@@ -1158,7 +1194,7 @@ pub(super) fn pretty_row_height(
         .collect();
     let source_line = if arena.source_names.len() > 1 { 1 } else { 0 };
     let layout = label_layout(&all_labels, content_width);
-    msg_lines + source_line + layout.num_rows
+    (msg_lines + source_line + layout.num_rows).max(1)
 }
 
 fn level_style(level: &str) -> Style {
