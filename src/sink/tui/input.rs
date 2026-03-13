@@ -144,6 +144,12 @@ impl App {
             (KeyCode::Char('s'), _) => {
                 self.enter_source_select();
             }
+            (KeyCode::Char('>'), _) => {
+                self.apply_time_filter(true);
+            }
+            (KeyCode::Char('<'), _) => {
+                self.apply_time_filter(false);
+            }
             _ => {}
         }
     }

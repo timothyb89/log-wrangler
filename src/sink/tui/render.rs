@@ -780,7 +780,7 @@ impl App {
                 if arena.source_names.len() > 1 {
                     hints.push_str(" s:sources");
                 }
-                hints.push_str(" a:add v:view t:tz");
+                hints.push_str(" >:after <:before a:add v:view t:tz");
 
                 let status = format!(
                     " {} | {} | {} | Filters: {} | View: {}/{} entries{} | {}",

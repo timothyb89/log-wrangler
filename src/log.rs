@@ -257,6 +257,12 @@ impl LogView {
                     let matches = entry.source_id == *sid;
                     if filter.inverted { !matches } else { matches }
                 }
+                crate::filter::FilterTarget::After(ts) => {
+                    entry.timestamp >= *ts
+                }
+                crate::filter::FilterTarget::Before(ts) => {
+                    entry.timestamp <= *ts
+                }
             };
 
             if !matches {

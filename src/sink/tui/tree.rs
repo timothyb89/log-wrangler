@@ -188,6 +188,15 @@ impl App {
                             .unwrap_or("?");
                         return format!("[{}]", name);
                     }
+                    // Display time filters with direction and timestamp.
+                    if let FilterTarget::After(ts) = &f.target {
+                        let formatted = format!("{}", ts.strftime("%H:%M:%S%.3f"));
+                        return format!(">= {}", formatted);
+                    }
+                    if let FilterTarget::Before(ts) = &f.target {
+                        let formatted = format!("{}", ts.strftime("%H:%M:%S%.3f"));
+                        return format!("<= {}", formatted);
+                    }
                     let prefix = if f.inverted { "!" } else { "" };
                     match &f.mode {
                         FilterMode::Substring(p, _) => format!("{}\"{}\"", prefix, p),

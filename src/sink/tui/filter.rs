@@ -386,6 +386,61 @@ impl App {
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
     }
 
+    /// Create a child LogView filtered to entries after (>=) or before (<=) a
+    /// reference timestamp. If an entry is selected, its timestamp is used;
+    /// otherwise the current wall-clock time is used.
+    pub(super) fn apply_time_filter(&mut self, keep_after: bool) {
+        let Ok(mut arena) = self.arena.lock() else {
+            return;
+        };
+
+        let reference_ts = if let ScrollState::Selected(view_idx) = &self.scroll {
+            let view = arena.view_at(&self.view_path);
+            let clamped = (*view_idx).min(view.entries.len().saturating_sub(1));
+            view.entries.get(clamped).map(|&idx| arena.entries[idx].timestamp.clone())
+        } else {
+            None
+        };
+        let reference_ts = reference_ts.unwrap_or_else(jiff::Zoned::now);
+
+        let target = if keep_after {
+            FilterTarget::After(reference_ts)
+        } else {
+            FilterTarget::Before(reference_ts)
+        };
+
+        let filter = Filter {
+            mode: FilterMode::substring(String::new()),
+            target,
+            inverted: false,
+        };
+
+        let parent = arena.view_at(&self.view_path);
+        let mut child_entries = Vec::with_capacity(parent.entries.len());
+        for &arena_idx in &parent.entries {
+            if entry_matches_filter(&arena, arena_idx, &filter) {
+                child_entries.push(arena_idx);
+            }
+        }
+
+        let child = LogView {
+            filters: vec![filter],
+            children: Vec::new(),
+            entries: child_entries,
+        };
+
+        let parent_mut = arena.view_at_mut(&self.view_path);
+        let child_idx = parent_mut.children.len();
+        parent_mut.children.push(child);
+
+        let selected = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+        self.view_path.push(child_idx);
+        self.h_scroll = 0;
+        self.v_scroll = 0;
+        self.scroll = Self::reselect_scroll(&arena, &self.view_path, selected);
+        self.current_entry_count = arena.view_at(&self.view_path).entries.len();
+    }
+
     pub(super) fn pop_filter(&mut self) {
         if self.view_path.is_empty() {
             return;
@@ -509,6 +564,12 @@ pub(super) fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Fil
             } else {
                 entry.source_id == *sid
             };
+        }
+        crate::filter::FilterTarget::After(ts) => {
+            return entry.timestamp >= *ts;
+        }
+        crate::filter::FilterTarget::Before(ts) => {
+            return entry.timestamp <= *ts;
         }
     };
 
