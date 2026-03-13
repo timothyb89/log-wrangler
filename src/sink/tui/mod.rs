@@ -7,6 +7,8 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::time::MissedTickBehavior;
+
 use color_eyre::Result;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::terminal::{
@@ -259,6 +261,8 @@ pub(crate) async fn run_tui(
 
     let mut app = App::new(arena, sources, ingest_tx, next_source_id);
     let mut tick_interval = tokio::time::interval(Duration::from_millis(100));
+    // Avoid burst re-renders when ticks are missed during a slow frame.
+    tick_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     // Use a dedicated thread for reading crossterm events instead of EventStream.
     // EventStream has a known mutex contention issue: its background thread holds
@@ -278,10 +282,10 @@ pub(crate) async fn run_tui(
         }
     });
 
-    loop {
-        app.update_from_arena();
-        terminal.draw(|frame| app.render(frame))?;
+    // Initial render.
+    terminal.draw(|frame| app.render(frame))?;
 
+    loop {
         tokio::select! {
             biased;
 
@@ -292,8 +296,17 @@ pub(crate) async fn run_tui(
                 while let Ok(event) = event_rx.try_recv() {
                     app.handle_event(event);
                 }
+
+                terminal.draw(|frame| app.render(frame))?;
             }
-            _ = tick_interval.tick() => {}
+            _ = tick_interval.tick() => {
+                // Only re-render when new log entries have arrived.
+                let prev_count = app.current_entry_count;
+                app.update_from_arena();
+                if app.current_entry_count != prev_count {
+                    terminal.draw(|frame| app.render(frame))?;
+                }
+            }
         }
 
         if app.should_quit {
