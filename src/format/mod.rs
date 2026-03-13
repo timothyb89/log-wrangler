@@ -96,11 +96,11 @@ impl ClassifierChain {
 /// message text. If the inner classifier recognises the message (e.g. it is
 /// itself a JSON log line), its level, structured fields, and inner message
 /// replace or augment the outer classifier's output. This enables transparent
-/// encapsulated log processing: systemd captures a service's JSON output as a
+/// encapsulated log processing: journald captures a service's JSON output as a
 /// plain text `MESSAGE`; `Encapsulating` re-classifies that text automatically.
 ///
 /// `name()` delegates to the outer classifier so `_classifier` still reflects
-/// the outer format (e.g. `journald-json` or `systemd`).
+/// the outer format (e.g. `journald-json` or `journald`).
 pub struct Encapsulating {
     pub outer: Box<dyn Classifier>,
     pub inner: Box<dyn Classifier>,

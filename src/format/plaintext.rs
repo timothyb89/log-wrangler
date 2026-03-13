@@ -57,7 +57,7 @@ fn parse_syslog_timestamp(month_str: &str, day_str: &str, time_str: &str) -> Opt
 
 impl Classifier for SystemdClassifier {
     fn name(&self) -> &'static str {
-        "systemd"
+        "journald"
     }
 
     fn classify(&self, input: &str, out: &mut ParseOutput) -> bool {

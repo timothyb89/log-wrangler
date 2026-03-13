@@ -256,7 +256,7 @@ fn build_classifier_chain(
                 inner: Box::new(format::json::default()),
             })])
         }
-        Some("systemd") => {
+        Some("journald") => {
             format::ClassifierChain::new(vec![Box::new(format::Encapsulating {
                 outer: Box::new(format::plaintext::SystemdClassifier),
                 inner: Box::new(format::json::default()),
@@ -286,13 +286,18 @@ fn build_classifier_chain(
 }
 
 /// Default classifier chain used when no explicit format hint is given.
-/// Tries journald JSON first (strict: requires the `MESSAGE` key), then falls
-/// back to generic JSON. The `last_hit` cache means a stable-format stream
-/// pays at most one extra classification attempt on the very first message.
+/// Tries journald JSON first (strict: requires the `MESSAGE` key), then
+/// journald plaintext (strict regex), then falls back to generic JSON.
+/// The `last_hit` cache means a stable-format stream pays at most one extra
+/// classification attempt on the very first message.
 fn default_auto_chain() -> format::ClassifierChain {
     format::ClassifierChain::new(vec![
         Box::new(format::Encapsulating {
             outer: Box::new(format::json::journald_json()),
+            inner: Box::new(format::json::default()),
+        }),
+        Box::new(format::Encapsulating {
+            outer: Box::new(format::plaintext::SystemdClassifier),
             inner: Box::new(format::json::default()),
         }),
         Box::new(format::json::default()),
