@@ -7,6 +7,7 @@ use std::{
 use lasso::{Spur, ThreadedRodeo};
 
 use crate::filter::Filter;
+use crate::format::{normalize_level, ClassifierChain, ParseOutput};
 use crate::source::SourceMessage;
 
 /// Path from root to the currently active LogView.
@@ -279,57 +280,45 @@ pub(crate) struct MetaRodeo {
     pub label_values: Arc<ThreadedRodeo<Spur>>,
 }
 
-fn json_value_to_string(v: &serde_json::Value) -> String {
-    match v {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => "null".to_string(),
-        other => other.to_string(),
-    }
-}
-
-/// Fields to skip when collecting structured fields from nested JSON.
-const NESTED_JSON_SKIP_FIELDS: &[&str] = &["level", "message", "msg", "timestamp", "time", "ts"];
-
 /// Parse a RawLog into interned fields and store labels/structured_fields in the
 /// arena. Returns a LogEntry ready for insertion into `arena.entries`.
+///
+/// `chain` is the classifier for this source (looked up by source_id). `out` is
+/// a pre-allocated scratch buffer reused across calls; it is cleared on return.
 fn parse_raw_log(
     incoming: crate::source::RawLog,
     rodeo: &MetaRodeo,
     arena: &Arc<Mutex<Arena>>,
     label_pairs: &mut Vec<(Spur, Spur)>,
     sf_pairs: &mut Vec<(Spur, Spur)>,
+    chain: Option<&ClassifierChain>,
+    out: &mut ParseOutput,
 ) -> LogEntry {
-    // Try to parse the message as nested JSON to extract structured fields.
-    let (level, inner_message) =
-        if let Ok(serde_json::Value::Object(map)) =
-            serde_json::from_str::<serde_json::Value>(&incoming.message)
-        {
-            let level = map
-                .get("level")
-                .map(json_value_to_string)
-                .map(|s| rodeo.label_values.get_or_intern(s));
+    // Run the classifier for this source (if any).
+    if let Some(chain) = chain {
+        chain.classify(&incoming.message, out);
+    }
 
-            let inner_msg = map
-                .get("message")
-                .or_else(|| map.get("msg"))
-                .map(json_value_to_string)
-                .map(|s| rodeo.messages.get_or_intern(s));
+    // Child timestamp wins over the outer source timestamp (per encapsulation
+    // field precedence rules).
+    let timestamp = out.timestamp.take().unwrap_or(incoming.timestamp);
 
-            for (k, v) in &map {
-                if NESTED_JSON_SKIP_FIELDS.contains(&k.as_str()) {
-                    continue;
-                }
-                let key = rodeo.label_keys.get_or_intern(k.as_str());
-                let val = rodeo.label_values.get_or_intern(json_value_to_string(v));
-                sf_pairs.push((key, val));
-            }
+    let level = out
+        .level
+        .take()
+        .map(|s| rodeo.label_values.get_or_intern(normalize_level(&s)));
 
-            (level, inner_msg)
-        } else {
-            (None, None)
-        };
+    let inner_message = out
+        .message
+        .take()
+        .map(|s| rodeo.messages.get_or_intern(s));
+
+    for (k, v) in out.fields.drain(..) {
+        let key = rodeo.label_keys.get_or_intern(&k);
+        let val = rodeo.label_values.get_or_intern(&v);
+        sf_pairs.push((key, val));
+    }
+    // out is now fully consumed; no explicit clear needed.
 
     let message = rodeo.messages.get_or_intern(incoming.message);
     for (raw_key, raw_value) in incoming.labels {
@@ -349,7 +338,7 @@ fn parse_raw_log(
     arena.structured_fields.extend(sf_pairs.drain(0..));
 
     LogEntry {
-        timestamp: incoming.timestamp,
+        timestamp,
         message,
         source_id: incoming.source_id,
         labels_start: start,
@@ -415,6 +404,8 @@ pub(crate) fn ingest(
     rx: mpsc::Receiver<SourceMessage>,
     arena: Arc<Mutex<Arena>>,
     reorder_buffer: Option<Duration>,
+    classifiers: Vec<ClassifierChain>,
+    default_chain: ClassifierChain,
 ) {
     let rodeo = {
         let arena = arena.lock().unwrap();
@@ -423,6 +414,11 @@ pub(crate) fn ingest(
 
     let mut label_pairs: Vec<(Spur, Spur)> = Vec::new();
     let mut sf_pairs: Vec<(Spur, Spur)> = Vec::new();
+    let mut parse_out = ParseOutput::new();
+
+    let get_chain = |source_id: u16| -> &ClassifierChain {
+        classifiers.get(source_id as usize).unwrap_or(&default_chain)
+    };
 
     if let Some(buffer_duration) = reorder_buffer {
         // Buffered path: hold messages and flush sorted by timestamp.
@@ -442,7 +438,8 @@ pub(crate) fn ingest(
                     arena.clear_source(source_id);
                 }
                 Ok(SourceMessage::Log(raw)) => {
-                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs);
+                    let chain = get_chain(raw.source_id);
+                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs, Some(chain), &mut parse_out);
                     heap.push(PendingEntry {
                         inner: entry,
                         received: Instant::now(),
@@ -466,7 +463,8 @@ pub(crate) fn ingest(
                     arena.clear_source(source_id);
                 }
                 SourceMessage::Log(raw) => {
-                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs);
+                    let chain = get_chain(raw.source_id);
+                    let entry = parse_raw_log(raw, &rodeo, &arena, &mut label_pairs, &mut sf_pairs, Some(chain), &mut parse_out);
                     let mut arena = arena.lock().unwrap();
                     commit_entry(&mut arena, entry);
                 }

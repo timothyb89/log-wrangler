@@ -47,6 +47,15 @@ pub struct Args {
     /// Follow mode: stream new logs via WebSocket after initial fetch.
     #[arg(long)]
     pub follow: bool,
+
+    /// Regex pattern for the `regex` format. Used when any source specifies
+    /// `?format=regex`. Must contain named capture groups `timestamp` and
+    /// `level`; an optional `message` group overrides the full line as the
+    /// displayed message. Any additional named groups become structured fields.
+    ///
+    /// Example: `(?P<timestamp>\S+) (?P<level>\w+) (?P<message>.*)`
+    #[arg(long)]
+    pub format_regex: Option<String>,
 }
 
 /// Resolve the start time from CLI args.

@@ -25,7 +25,11 @@ pub enum SourceMessage {
 
 /// Parsed source configuration from the `--source` URI.
 pub enum SourceConfig {
-    Stdin,
+    Stdin {
+        /// Optional format hint from the `?format=` URI query parameter,
+        /// e.g. `stdin://?format=slog`.
+        format_hint: Option<String>,
+    },
     GrafanaLoki { base_url: url::Url },
     /// Grafana+Loki accessed through a Teleport app proxy.
     /// `app_name` is the Teleport app name; `loki_path` is the path on the
@@ -88,7 +92,7 @@ pub fn parse_named_source(raw: &str, index: usize) -> Result<NamedSource> {
     let config = parse_source_uri(uri)?;
 
     let name = name.unwrap_or_else(|| match &config {
-        SourceConfig::Stdin => "stdin".to_string(),
+        SourceConfig::Stdin { .. } => "stdin".to_string(),
         SourceConfig::GrafanaLoki { .. } => format!("loki-{}", index),
         SourceConfig::GrafanaLokiTeleport { app_name, .. } => app_name.clone(),
     });
@@ -107,8 +111,18 @@ pub fn parse_named_source(raw: &str, index: usize) -> Result<NamedSource> {
 /// - `grafana+loki+http://host:port/path` — Grafana Loki datasource proxy
 /// - `grafana+loki+https://host:port/path` — same, over HTTPS
 pub fn parse_source_uri(uri: &str) -> Result<SourceConfig> {
-    if uri == "stdin://" || uri == "stdin" {
-        return Ok(SourceConfig::Stdin);
+    if uri == "stdin" {
+        return Ok(SourceConfig::Stdin { format_hint: None });
+    }
+
+    if uri.starts_with("stdin://") {
+        let url = url::Url::parse(uri)
+            .map_err(|e| eyre!("Invalid stdin URI '{}': {}", uri, e))?;
+        let format_hint = url
+            .query_pairs()
+            .find(|(k, _)| k == "format")
+            .map(|(_, v)| v.into_owned());
+        return Ok(SourceConfig::Stdin { format_hint });
     }
 
     if let Some(rest) = uri.strip_prefix("grafana+loki+teleport://") {

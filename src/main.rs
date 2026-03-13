@@ -8,6 +8,7 @@ use color_eyre::Result;
 
 mod cli;
 mod filter;
+mod format;
 mod log;
 mod sink;
 mod source;
@@ -83,11 +84,18 @@ async fn main() -> Result<()> {
     // Route internal tracing events into the arena as native log entries.
     util::set_internal_log_sender(tx.clone());
 
+    // Build a classifier chain for each source (indexed by source_id).
+    let classifiers: Vec<format::ClassifierChain> = sources
+        .iter()
+        .map(|src| build_classifier_chain(&src.config, args.format_regex.as_deref()))
+        .collect();
+
     // Spawn the ingest thread (blocking, uses std mpsc).
     let arena_clone = arena.clone();
     let reorder_buffer = args.reorder_buffer;
+    let default_chain = format::ClassifierChain::new(vec![Box::new(format::json::default())]);
     std::thread::spawn(move || {
-        log::ingest(rx, arena_clone, reorder_buffer);
+        log::ingest(rx, arena_clone, reorder_buffer, classifiers, default_chain);
     });
 
     // Resolve any Teleport sources before opening the TUI so that `tsh` can
@@ -109,7 +117,7 @@ async fn main() -> Result<()> {
 
     for src in sources {
         match src.config {
-            SourceConfig::Stdin => {
+            SourceConfig::Stdin { .. } => {
                 managed_sources.push(sink::tui::ManagedSource {
                     source_id: src.id,
                     name: src.name,
@@ -228,4 +236,46 @@ async fn main() -> Result<()> {
     sink::tui::run_tui(arena, managed_sources, tx, next_source_id).await?;
 
     Ok(())
+}
+
+fn build_classifier_chain(
+    config: &SourceConfig,
+    format_regex: Option<&str>,
+) -> format::ClassifierChain {
+    let hint = match config {
+        SourceConfig::Stdin { format_hint } => format_hint.as_deref(),
+        _ => None,
+    };
+
+    match hint {
+        Some("slog") => {
+            format::ClassifierChain::new(vec![Box::new(format::json::slog())])
+        }
+        Some("rust-tracing") => {
+            format::ClassifierChain::new(vec![Box::new(format::json::rust_tracing())])
+        }
+        Some("journald-json") => {
+            format::ClassifierChain::new(vec![Box::new(format::json::journald_json())])
+        }
+        Some("generic") => {
+            format::ClassifierChain::new(vec![Box::new(format::plaintext::GenericClassifier)])
+        }
+        Some("regex") => {
+            if let Some(pattern) = format_regex {
+                match regex::Regex::new(pattern) {
+                    Ok(re) => format::ClassifierChain::new(vec![
+                        Box::new(format::plaintext::RegexClassifier { pattern: re }),
+                    ]),
+                    Err(e) => {
+                        eprintln!("Warning: invalid --format-regex pattern: {e}");
+                        format::ClassifierChain::new(vec![Box::new(format::json::default())])
+                    }
+                }
+            } else {
+                eprintln!("Warning: format=regex requires --format-regex");
+                format::ClassifierChain::new(vec![Box::new(format::json::default())])
+            }
+        }
+        _ => format::ClassifierChain::new(vec![Box::new(format::json::default())]),
+    }
 }
