@@ -1118,7 +1118,12 @@ impl App {
         // Height: 3 for input box (border + input + border) + items + 2 for list borders.
         let list_height = (filtered.len() as u16).min(area.height.saturating_sub(7));
         let dialog_height = 3 + list_height + 2;
-        let popup_area = centered_rect_fixed(60, dialog_height, area);
+        // Top-anchored with a small offset so filtering doesn't shift the dialog.
+        let w = (area.width as u32 * 60 / 100) as u16;
+        let left = area.x + (area.width.saturating_sub(w)) / 2;
+        let top = area.y + 2;
+        let h = dialog_height.min(area.height.saturating_sub(2));
+        let popup_area = ratatui::layout::Rect::new(left, top, w, h);
         frame.render_widget(Clear, popup_area);
 
         let chunks = Layout::vertical([
