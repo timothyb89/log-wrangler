@@ -27,6 +27,7 @@ rustls-pemfile = "2"
 rustls-native-certs = "0.8"
 url = { version = "2", features = ["serde"] }
 memchr = "2.8.0"
+dirs = "6"
 
 # The profile that 'dist' will build with
 [profile.dist]

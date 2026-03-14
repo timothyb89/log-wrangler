@@ -540,6 +540,106 @@ impl App {
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
     }
 
+    /// Save the current configuration as a profile.
+    pub(super) fn save_profile(&mut self, name_or_path: &str) {
+        let path = match crate::profile::resolve_profile_path(name_or_path) {
+            Ok(p) => p,
+            Err(e) => {
+                if let OverlayMode::ProfileSaveDialog(ref mut state) = self.overlay {
+                    state.error = Some(format!("{}", e));
+                }
+                return;
+            }
+        };
+
+        let arena = match self.arena.lock() {
+            Ok(a) => a,
+            Err(_) => return,
+        };
+
+        let profile = crate::profile::Profile::from_app_state(&self.sources, &arena);
+        drop(arena);
+
+        if let Err(e) = crate::profile::save_profile(&profile, &path) {
+            if let OverlayMode::ProfileSaveDialog(ref mut state) = self.overlay {
+                state.error = Some(format!("{}", e));
+            }
+            return;
+        }
+
+        self.overlay = OverlayMode::None;
+    }
+
+    /// Load a profile and apply sources, filters, or both based on mode.
+    pub(super) fn load_profile(&mut self, path: &std::path::Path, mode: &crate::profile::ProfileLoadMode) {
+        let profile = match crate::profile::load_profile(path) {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
+        match mode {
+            crate::profile::ProfileLoadMode::All => {
+                self.apply_profile_sources(&profile);
+                self.apply_profile_filters(&profile);
+            }
+            crate::profile::ProfileLoadMode::Sources => {
+                self.apply_profile_sources(&profile);
+            }
+            crate::profile::ProfileLoadMode::Filters => {
+                self.apply_profile_filters(&profile);
+            }
+        }
+    }
+
+    fn apply_profile_sources(&mut self, profile: &crate::profile::Profile) {
+        let Some(sources) = &profile.sources else { return };
+
+        for ps in sources {
+            // Skip stdin sources at runtime (stdin is a one-shot resource).
+            if ps.uri.starts_with("stdin") {
+                continue;
+            }
+
+            let config = match crate::source::parse_source_uri(&ps.uri) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            match config {
+                crate::source::SourceConfig::GrafanaLoki { base_url } => {
+                    let query = match &ps.query {
+                        Some(q) => q.clone(),
+                        None => continue,
+                    };
+                    self.spawn_loki_source(ps.name.clone(), base_url, query, None);
+                }
+                crate::source::SourceConfig::Subcommand { command } => {
+                    let cmd = ps.query.as_ref().or(command.as_ref());
+                    if let Some(cmd) = cmd {
+                        self.spawn_subcommand_source(ps.name.clone(), cmd.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_profile_filters(&mut self, profile: &crate::profile::Profile) {
+        let Some(tree) = &profile.filters else { return };
+
+        let Ok(mut arena) = self.arena.lock() else { return };
+
+        let new_root = crate::profile::profile_to_view_tree(tree, &arena.rodeo, &arena.source_names);
+        arena.root_view = new_root;
+        arena.rebuild_views();
+
+        self.view_path.clear();
+        self.scroll = ScrollState::Tail;
+        self.h_scroll = 0;
+        self.v_scroll = 0;
+        self.current_entry_count = arena.root_view.entries.len();
+    }
+
     pub(super) fn navigate_sibling(&mut self, direction: i32) {
         if self.view_path.is_empty() {
             return;

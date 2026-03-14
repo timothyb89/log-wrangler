@@ -19,6 +19,7 @@ use ratatui::backend::CrosstermBackend;
 
 use crate::filter::Filter;
 use crate::log::{Arena, ViewPath};
+use crate::profile::{self, ProfileLoadMode};
 use crate::source::SourceMessage;
 use crate::source::loki::LokiSourceParams;
 use crate::source::teleport::TeleportTlsConfig;
@@ -78,6 +79,8 @@ enum OverlayMode {
     SourceSelect { cursor: usize },
     SourceDialog(SourceDialogState),
     CommandPalette(CommandPaletteState),
+    ProfileSaveDialog(ProfileSaveState),
+    ProfileLoadDialog(ProfileLoadState),
 }
 
 /// State for the command palette overlay.
@@ -114,6 +117,54 @@ impl CommandPaletteState {
             .iter()
             .enumerate()
             .filter(|(_, entry)| entry.name.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+/// State for the profile save dialog.
+struct ProfileSaveState {
+    /// Text buffer for the profile name (or path).
+    input: String,
+    cursor: usize,
+    error: Option<String>,
+}
+
+/// State for the profile load dialog.
+struct ProfileLoadState {
+    /// Cached list of discovered profiles.
+    profiles: Vec<(String, std::path::PathBuf)>,
+    /// Selected index in the profile list.
+    cursor: usize,
+    /// Which parts of the profile to load.
+    load_mode: ProfileLoadMode,
+    /// Text input for filtering the list or entering a custom path.
+    input: String,
+    input_cursor: usize,
+}
+
+impl ProfileLoadState {
+    fn new(load_mode: ProfileLoadMode) -> Self {
+        let profiles = profile::list_profiles().unwrap_or_default();
+        Self {
+            profiles,
+            cursor: 0,
+            load_mode,
+            input: String::new(),
+            input_cursor: 0,
+        }
+    }
+
+    /// Return indices into `self.profiles` matching the current input filter.
+    fn filtered_indices(&self) -> Vec<usize> {
+        if self.input.is_empty() {
+            return (0..self.profiles.len()).collect();
+        }
+        let query = self.input.to_lowercase();
+        self.profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, (name, _))| name.to_lowercase().contains(&query))
             .map(|(i, _)| i)
             .collect()
     }

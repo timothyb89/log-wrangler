@@ -152,6 +152,25 @@ impl Arena {
         clear_view(&mut self.root_view, &self.entries, source_id);
     }
 
+    /// Re-ingest all existing entries through the current view tree.
+    /// Called after replacing root_view with a profile's filter structure.
+    pub fn rebuild_views(&mut self) {
+        fn clear_entries(view: &mut LogView) {
+            view.entries.clear();
+            for child in &mut view.children {
+                clear_entries(child);
+            }
+        }
+        clear_entries(&mut self.root_view);
+
+        let len = self.entries.len();
+        for idx in 0..len {
+            let a = &mut *self;
+            let entry_ref = &a.entries[idx];
+            a.root_view.ingest(&a.rodeo, &a.labels, entry_ref, idx);
+        }
+    }
+
     /// Navigate to a LogView by path.
     pub fn view_at(&self, path: &[usize]) -> &LogView {
         let mut current = &self.root_view;

@@ -3,7 +3,7 @@ use crossterm::event::{
 };
 
 use super::action::{Action, COMMAND_REGISTRY};
-use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ScrollState, SourceDialogMode, SourceDialogSourceType, SourceDialogState, TimezoneMode, ToolbarMode};
+use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ProfileLoadState, ProfileSaveState, ScrollState, SourceDialogMode, SourceDialogSourceType, SourceDialogState, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -27,6 +27,14 @@ impl App {
                     }
                     OverlayMode::CommandPalette(_) => {
                         self.handle_command_palette_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::ProfileSaveDialog(_) => {
+                        self.handle_profile_save_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::ProfileLoadDialog(_) => {
+                        self.handle_profile_load_key(key.code, key.modifiers);
                         return;
                     }
                     OverlayMode::None => {}
@@ -223,6 +231,28 @@ impl App {
             }
             Action::OpenCommandPalette => {
                 self.overlay = OverlayMode::CommandPalette(CommandPaletteState::new());
+            }
+            Action::SaveProfile => {
+                self.overlay = OverlayMode::ProfileSaveDialog(ProfileSaveState {
+                    input: String::new(),
+                    cursor: 0,
+                    error: None,
+                });
+            }
+            Action::LoadProfile => {
+                self.overlay = OverlayMode::ProfileLoadDialog(
+                    ProfileLoadState::new(crate::profile::ProfileLoadMode::All),
+                );
+            }
+            Action::LoadProfileSourcesOnly => {
+                self.overlay = OverlayMode::ProfileLoadDialog(
+                    ProfileLoadState::new(crate::profile::ProfileLoadMode::Sources),
+                );
+            }
+            Action::LoadProfileFiltersOnly => {
+                self.overlay = OverlayMode::ProfileLoadDialog(
+                    ProfileLoadState::new(crate::profile::ProfileLoadMode::Filters),
+                );
             }
         }
     }
@@ -524,6 +554,188 @@ impl App {
                 state.input.insert(state.cursor, c);
                 state.cursor += 1;
                 state.selected = 0;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_profile_save_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.overlay = OverlayMode::None;
+            }
+            KeyCode::Enter => {
+                let input = match &self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s.input.trim().to_string(),
+                    _ => return,
+                };
+                if input.is_empty() {
+                    let state = match &mut self.overlay {
+                        OverlayMode::ProfileSaveDialog(s) => s,
+                        _ => return,
+                    };
+                    state.error = Some("Name is required".to_string());
+                    return;
+                }
+                self.save_profile(&input);
+            }
+            KeyCode::Backspace => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                    state.input.remove(state.cursor);
+                    state.error = None;
+                }
+            }
+            KeyCode::Delete => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                if state.cursor < state.input.len() {
+                    state.input.remove(state.cursor);
+                    state.error = None;
+                }
+            }
+            KeyCode::Left => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = (state.cursor + 1).min(state.input.len());
+            }
+            KeyCode::Home => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = 0;
+            }
+            KeyCode::End => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.input.len();
+            }
+            KeyCode::Char(c) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileSaveDialog(s) => s,
+                    _ => return,
+                };
+                state.input.insert(state.cursor, c);
+                state.cursor += 1;
+                state.error = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_profile_load_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        match (code, modifiers) {
+            (KeyCode::Esc, _) => {
+                self.overlay = OverlayMode::None;
+            }
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                let max = state.filtered_indices().len().saturating_sub(1);
+                state.cursor = (state.cursor + 1).min(max);
+            }
+            (KeyCode::Enter, _) => {
+                let (path, mode) = match &self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => {
+                        let filtered = s.filtered_indices();
+                        if filtered.is_empty() && !s.input.is_empty() {
+                            // Treat input as a custom path.
+                            (std::path::PathBuf::from(&s.input), s.load_mode.clone())
+                        } else if let Some(&idx) = filtered.get(s.cursor) {
+                            (s.profiles[idx].1.clone(), s.load_mode.clone())
+                        } else {
+                            return;
+                        }
+                    }
+                    _ => return,
+                };
+                self.overlay = OverlayMode::None;
+                self.load_profile(&path, &mode);
+            }
+            (KeyCode::Backspace, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                if state.input_cursor > 0 {
+                    state.input_cursor -= 1;
+                    state.input.remove(state.input_cursor);
+                    state.cursor = 0;
+                }
+            }
+            (KeyCode::Delete, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                if state.input_cursor < state.input.len() {
+                    state.input.remove(state.input_cursor);
+                    state.cursor = 0;
+                }
+            }
+            (KeyCode::Left, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.input_cursor = state.input_cursor.saturating_sub(1);
+            }
+            (KeyCode::Right, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.input_cursor = (state.input_cursor + 1).min(state.input.len());
+            }
+            (KeyCode::Home, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.input_cursor = 0;
+            }
+            (KeyCode::End, _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.input_cursor = state.input.len();
+            }
+            (KeyCode::Char(c), _) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ProfileLoadDialog(s) => s,
+                    _ => return,
+                };
+                state.input.insert(state.input_cursor, c);
+                state.input_cursor += 1;
+                state.cursor = 0;
             }
             _ => {}
         }

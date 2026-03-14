@@ -77,6 +77,12 @@ impl App {
             OverlayMode::CommandPalette(_) => {
                 self.render_command_palette(frame, frame.area());
             }
+            OverlayMode::ProfileSaveDialog(_) => {
+                self.render_profile_save_dialog(frame, frame.area());
+            }
+            OverlayMode::ProfileLoadDialog(_) => {
+                self.render_profile_load_dialog(frame, frame.area());
+            }
             OverlayMode::None => {}
         }
     }
@@ -1169,6 +1175,141 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title_bottom(" ↑↓ : navigate   Enter : run   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
+            .highlight_symbol("> ");
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(selected));
+        frame.render_stateful_widget(list, chunks[1], &mut list_state);
+    }
+
+    fn render_profile_save_dialog(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let state = match &self.overlay {
+            OverlayMode::ProfileSaveDialog(s) => s,
+            _ => return,
+        };
+
+        let height = if state.error.is_some() { 7 } else { 5 };
+        let popup_area = centered_rect_fixed(60, height, area);
+        frame.render_widget(Clear, popup_area);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Save Profile ")
+            .title_bottom(" Enter : save   Esc : cancel ");
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let label_style = Style::default().fg(Color::Gray);
+        let field_style = Style::default().fg(Color::White);
+        let error_style = Style::default().fg(Color::Red);
+
+        // Name label.
+        let label_y = inner.y + 1;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("    Name: ", label_style))),
+            ratatui::layout::Rect::new(inner.x, label_y, 10, 1),
+        );
+
+        // Name input field.
+        let field_x = inner.x + 10;
+        let field_width = inner.width.saturating_sub(12) as usize;
+        let scroll_offset = if state.cursor > field_width.saturating_sub(2) {
+            state.cursor - field_width.saturating_sub(2)
+        } else {
+            0
+        };
+        let visible: String = state.input.chars().skip(scroll_offset).take(field_width).collect();
+        let field_text = format!("{:<width$}", visible, width = field_width);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(field_text, field_style))),
+            ratatui::layout::Rect::new(field_x, label_y, field_width as u16, 1),
+        );
+
+        let cursor_x = field_x + (state.cursor - scroll_offset) as u16;
+        frame.set_cursor_position((cursor_x, label_y));
+
+        if let Some(err) = &state.error {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(err.as_str(), error_style))),
+                ratatui::layout::Rect::new(inner.x + 2, label_y + 2, inner.width.saturating_sub(4), 1),
+            );
+        }
+    }
+
+    fn render_profile_load_dialog(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let state = match &self.overlay {
+            OverlayMode::ProfileLoadDialog(s) => s,
+            _ => return,
+        };
+
+        let filtered = state.filtered_indices();
+
+        let mode_label = match &state.load_mode {
+            crate::profile::ProfileLoadMode::All => "Load Profile",
+            crate::profile::ProfileLoadMode::Sources => "Load Profile (sources only)",
+            crate::profile::ProfileLoadMode::Filters => "Load Profile (filters only)",
+        };
+
+        // Height: 3 for input box + items + 2 for list borders.
+        let list_height = (filtered.len() as u16).min(area.height.saturating_sub(7));
+        let dialog_height = 3 + list_height + 2;
+        let w = (area.width as u32 * 60 / 100) as u16;
+        let left = area.x + (area.width.saturating_sub(w)) / 2;
+        let top = area.y + 2;
+        let h = dialog_height.min(area.height.saturating_sub(2)).max(7);
+        let popup_area = ratatui::layout::Rect::new(left, top, w, h);
+        frame.render_widget(Clear, popup_area);
+
+        let chunks = Layout::vertical([
+            Constraint::Length(3), // input
+            Constraint::Min(1),   // profile list
+        ])
+        .split(popup_area);
+
+        // Input field.
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .title(format!(" {} ", mode_label));
+        let input_paragraph = Paragraph::new(state.input.as_str()).block(input_block);
+        frame.render_widget(input_paragraph, chunks[0]);
+
+        let cursor_x = chunks[0].x + 1 + state.input_cursor as u16;
+        let cursor_y = chunks[0].y + 1;
+        frame.set_cursor_position((cursor_x, cursor_y));
+
+        // Profile list.
+        let items: Vec<ListItem> = if filtered.is_empty() && !state.input.is_empty() {
+            // When no matches and user has typed something, show the input as a
+            // custom path option.
+            vec![ListItem::new(Line::from(vec![
+                Span::styled("Open: ", Style::default().fg(Color::DarkGray)),
+                Span::raw(state.input.as_str()),
+            ]))]
+        } else {
+            filtered
+                .iter()
+                .map(|&idx| {
+                    let (name, path) = &state.profiles[idx];
+                    let line = Line::from(vec![
+                        Span::raw(name.as_str()),
+                        Span::styled(
+                            format!("  {}", path.display()),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                })
+                .collect()
+        };
+
+        let selected = state.cursor.min(items.len().saturating_sub(1));
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title_bottom(" ↑↓ : navigate   Enter : load   Esc : cancel "),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol("> ");

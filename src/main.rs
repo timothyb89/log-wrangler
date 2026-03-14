@@ -10,6 +10,7 @@ mod cli;
 mod filter;
 mod format;
 mod log;
+mod profile;
 mod sink;
 mod source;
 mod util;
@@ -27,18 +28,69 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    // Load profile if requested.
+    let loaded_profile = if let Some(ref profile_name) = args.profile {
+        let path = profile::resolve_profile_path(profile_name)?;
+        Some(profile::load_profile(&path)?)
+    } else {
+        None
+    };
+
+    // Determine source URIs. If a profile provides sources and the user didn't
+    // explicitly specify --source (i.e., we only have the default stdin://),
+    // use the profile's sources instead.
+    let source_strings: Vec<String> = {
+        let user_specified_sources = args.source.len() > 1
+            || (args.source.len() == 1 && args.source[0] != "stdin://");
+
+        let use_profile_sources = !user_specified_sources
+            && matches!(args.profile_mode, profile::ProfileLoadMode::All | profile::ProfileLoadMode::Sources)
+            && loaded_profile.as_ref().is_some_and(|p| p.sources.is_some());
+
+        if use_profile_sources {
+            let ps = loaded_profile.as_ref().unwrap().sources.as_ref().unwrap();
+            ps.iter()
+                .map(|s| {
+                    format!("{}={}", s.name, s.uri)
+                })
+                .collect()
+        } else {
+            args.source.clone()
+        }
+    };
+
     // Parse all source URIs.
-    let sources: Vec<NamedSource> = args
-        .source
+    let sources: Vec<NamedSource> = source_strings
         .iter()
         .enumerate()
         .map(|(i, raw)| source::parse_named_source(raw, i))
         .collect::<Result<_>>()?;
 
+    // Inject queries from profile sources (if using profile sources).
+    let mut profile_queries: Vec<String> = Vec::new();
+    {
+        let user_specified_sources = args.source.len() > 1
+            || (args.source.len() == 1 && args.source[0] != "stdin://");
+        let use_profile_sources = !user_specified_sources
+            && matches!(args.profile_mode, profile::ProfileLoadMode::All | profile::ProfileLoadMode::Sources)
+            && loaded_profile.as_ref().is_some_and(|p| p.sources.is_some());
+
+        if use_profile_sources {
+            if let Some(ps) = loaded_profile.as_ref().and_then(|p| p.sources.as_ref()) {
+                for s in ps {
+                    if let Some(q) = &s.query {
+                        profile_queries.push(format!("{}={}", s.name, q));
+                    }
+                }
+            }
+        }
+    }
+
     // Parse queries and build a name→query map.
     let queries: Vec<NamedQuery> = args
         .query
         .iter()
+        .chain(profile_queries.iter())
         .map(|raw| source::parse_named_query(raw))
         .collect();
 
@@ -87,6 +139,39 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Apply profile options as defaults (CLI flags take precedence).
+    let mut effective_since = args.since;
+    let mut effective_follow = args.follow;
+    let mut effective_reorder_buffer = args.reorder_buffer;
+    let effective_format_regex = args.format_regex.clone();
+    if matches!(args.profile_mode, profile::ProfileLoadMode::All) {
+        if let Some(opts) = loaded_profile.as_ref().and_then(|p| p.options.as_ref()) {
+            if effective_since.is_none() && args.start.is_none() {
+                if let Some(secs) = opts.since_secs {
+                    effective_since = Some(std::time::Duration::from_secs(secs));
+                }
+            }
+            if !effective_follow {
+                effective_follow = opts.follow.unwrap_or(false);
+            }
+            if effective_reorder_buffer.is_none() {
+                if let Some(secs) = opts.reorder_buffer_secs {
+                    effective_reorder_buffer = Some(std::time::Duration::from_secs(secs));
+                }
+            }
+        }
+    }
+
+    // Determine if we should load a filter tree from the profile.
+    let profile_filter_tree: Option<profile::ProfileViewTree> = if matches!(
+        args.profile_mode,
+        profile::ProfileLoadMode::All | profile::ProfileLoadMode::Filters
+    ) {
+        loaded_profile.and_then(|p| p.filters)
+    } else {
+        None
+    };
+
     let arena = log::Arena::new();
 
     // Register source names in the arena.
@@ -111,12 +196,12 @@ async fn main() -> Result<()> {
     // Build a classifier chain for each source (indexed by source_id).
     let classifiers: Vec<format::ClassifierChain> = sources
         .iter()
-        .map(|src| build_classifier_chain(&src.config, args.format_regex.as_deref()))
+        .map(|src| build_classifier_chain(&src.config, effective_format_regex.as_deref()))
         .collect();
 
     // Spawn the ingest thread (blocking, uses std mpsc).
     let arena_clone = arena.clone();
-    let reorder_buffer = args.reorder_buffer;
+    let reorder_buffer = effective_reorder_buffer;
     let default_chain = default_auto_chain();
     std::thread::spawn(move || {
         log::ingest(rx, arena_clone, reorder_buffer, classifiers, default_chain);
@@ -173,14 +258,14 @@ async fn main() -> Result<()> {
                     })?;
 
                 let now = jiff::Zoned::now();
-                let start = cli::resolve_start_time(&args.start, &args.since, &now)?;
+                let start = cli::resolve_start_time(&args.start, &effective_since, &now)?;
                 let end = cli::resolve_end_time(&args.end, &now)?;
 
                 let params = LokiSourceParams {
                     query: query.clone(),
                     start_ns: start.timestamp().as_nanosecond(),
                     end_ns: Some(end.timestamp().as_nanosecond()),
-                    follow: args.follow,
+                    follow: effective_follow,
                 };
 
                 let (wtx, wrx) = tokio::sync::watch::channel(None);
@@ -220,14 +305,14 @@ async fn main() -> Result<()> {
                     })?;
 
                 let now = jiff::Zoned::now();
-                let start = cli::resolve_start_time(&args.start, &args.since, &now)?;
+                let start = cli::resolve_start_time(&args.start, &effective_since, &now)?;
                 let end = cli::resolve_end_time(&args.end, &now)?;
 
                 let params = LokiSourceParams {
                     query: query.clone(),
                     start_ns: start.timestamp().as_nanosecond(),
                     end_ns: Some(end.timestamp().as_nanosecond()),
-                    follow: args.follow,
+                    follow: effective_follow,
                 };
 
                 let (wtx, wrx) = tokio::sync::watch::channel(None);
@@ -280,6 +365,13 @@ async fn main() -> Result<()> {
     }
 
     let next_source_id = num_cli_sources as u16;
+
+    // Apply startup filter tree from profile (before TUI starts, before entries arrive).
+    if let Some(ref tree) = profile_filter_tree {
+        let mut a = arena.lock().unwrap();
+        let new_root = profile::profile_to_view_tree(tree, &a.rodeo, &a.source_names);
+        a.root_view = new_root;
+    }
 
     // Run the TUI on the async runtime.
     sink::tui::run_tui(arena, managed_sources, tx, next_source_id).await?;

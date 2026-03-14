@@ -69,6 +69,15 @@ pub struct Args {
     ///   --source subcommand:// --subcommand 'tail -f /var/log/syslog'
     #[arg(long)]
     pub subcommand: Vec<String>,
+
+    /// Load a saved profile on startup. Can be a profile name (looked up in the
+    /// default profile directory) or a path to a JSON file.
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    /// Control what parts of a profile to load.
+    #[arg(long, value_enum, default_value = "all")]
+    pub profile_mode: crate::profile::ProfileLoadMode,
 }
 
 /// Resolve the start time from CLI args.

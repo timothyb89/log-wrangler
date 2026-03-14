@@ -25,6 +25,10 @@ pub(super) enum Action {
     AddSourceLoki,
     AddSourceSubcommand,
     OpenCommandPalette,
+    SaveProfile,
+    LoadProfile,
+    LoadProfileSourcesOnly,
+    LoadProfileFiltersOnly,
 }
 
 /// A command entry in the palette registry.
@@ -57,5 +61,9 @@ pub(super) const COMMAND_REGISTRY: &[CommandEntry] = &[
     CommandEntry { action: Action::ScrollToBottom,       name: "Scroll to bottom (tail)",    hint: "G" },
     CommandEntry { action: Action::AddSourceLoki,         name: "Add source: Loki",            hint: "" },
     CommandEntry { action: Action::AddSourceSubcommand,  name: "Add source: Subcommand",      hint: "" },
+    CommandEntry { action: Action::SaveProfile,          name: "Save profile",                hint: "" },
+    CommandEntry { action: Action::LoadProfile,          name: "Load profile",                hint: "" },
+    CommandEntry { action: Action::LoadProfileSourcesOnly, name: "Load profile (sources only)", hint: "" },
+    CommandEntry { action: Action::LoadProfileFiltersOnly, name: "Load profile (filters only)", hint: "" },
     CommandEntry { action: Action::Quit,                 name: "Quit",                        hint: "q" },
 ];
