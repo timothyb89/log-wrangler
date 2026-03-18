@@ -115,6 +115,8 @@ impl App {
         match (code, modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.dispatch_action(Action::Quit),
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.dispatch_action(Action::OpenCommandPalette),
+            (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::CONTROL) => self.scroll_to_next_day(),
+            (KeyCode::Up | KeyCode::Char('k'), KeyModifiers::CONTROL) => self.scroll_to_prev_day(),
             (KeyCode::Down | KeyCode::Char('j'), KeyModifiers::SHIFT) => {
                 self.scroll_proportional_down(10);
             }
@@ -890,6 +892,30 @@ impl App {
                 self.h_scroll = 0;
                 self.v_scroll = 0;
             }
+        }
+    }
+
+    fn scroll_to_next_day(&mut self) {
+        let current = match &self.scroll {
+            ScrollState::Selected(idx) => *idx,
+            ScrollState::Tail => return,
+        };
+        if let Some(&target) = self.day_transitions.iter().find(|&&p| p > current) {
+            self.scroll = ScrollState::Selected(target);
+            self.h_scroll = 0;
+            self.v_scroll = 0;
+        }
+    }
+
+    fn scroll_to_prev_day(&mut self) {
+        let current = match &self.scroll {
+            ScrollState::Tail => self.current_entry_count,
+            ScrollState::Selected(idx) => *idx,
+        };
+        if let Some(&target) = self.day_transitions.iter().rev().find(|&&p| p < current) {
+            self.scroll = ScrollState::Selected(target);
+            self.h_scroll = 0;
+            self.v_scroll = 0;
         }
     }
 }

@@ -303,6 +303,12 @@ pub(crate) struct App {
     /// do not shift the viewport.
     pretty_viewport_start: Option<usize>,
 
+    /// Positions in the current view's entries vec that are the first occurrence
+    /// of a new calendar date. Used for separator rendering and Ctrl+↑/↓ navigation.
+    /// Updated each render pass. Never includes position 0 (no separator before the
+    /// first entry).
+    day_transitions: Vec<usize>,
+
     /// Managed sources (stoppable/editable). Empty when no managed sources exist.
     sources: Vec<ManagedSource>,
 
@@ -342,6 +348,7 @@ impl App {
             visible_row_map: Vec::new(),
             log_list_body_y: 0,
             pretty_viewport_start: None,
+            day_transitions: Vec::new(),
             sources,
             ingest_tx,
             next_source_id,

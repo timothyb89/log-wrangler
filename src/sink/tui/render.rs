@@ -44,6 +44,64 @@ fn format_timestamp(ts: &jiff::Zoned, mode: TimezoneMode) -> String {
     format!("{}", converted.strftime("%H:%M:%S%.3f"))
 }
 
+/// Return the calendar date for an arena entry under the given timezone mode.
+fn entry_date(arena: &Arena, arena_idx: usize, tz: TimezoneMode) -> jiff::civil::Date {
+    let ts = &arena.entries[arena_idx].timestamp;
+    match tz {
+        TimezoneMode::Local => ts.with_time_zone(jiff::tz::TimeZone::system()).date(),
+        TimezoneMode::Utc => ts.with_time_zone(jiff::tz::TimeZone::UTC).date(),
+    }
+}
+
+/// Compute positions in `view.entries` that are the first occurrence of a new
+/// calendar date. Position 0 is always excluded — there is no separator before
+/// the very first entry, only before entries that represent a genuine day change.
+fn compute_day_transitions(view: &LogView, arena: &Arena, tz: TimezoneMode) -> Vec<usize> {
+    let mut seen: std::collections::HashSet<jiff::civil::Date> = Default::default();
+    let mut out = Vec::new();
+    for (pos, &arena_idx) in view.entries.iter().enumerate() {
+        let date = entry_date(arena, arena_idx, tz);
+        if seen.insert(date) && pos > 0 {
+            out.push(pos);
+        }
+    }
+    out
+}
+
+/// Build a separator row for a day transition.
+///
+/// `fixed_col_widths` are the widths (in chars) of all columns that precede the
+/// final `Min(1)` content column.  Each is filled with `─` characters.
+/// When `blank_first` is true, the first fixed column is left empty (used for
+/// the indicator column in pretty mode which is normally invisible).
+/// The content column gets a `── YYYY-MM-DD ──────…` label — the dash fill is
+/// deliberately oversized so ratatui clips it at the column boundary.
+fn make_day_separator_row(
+    date: jiff::civil::Date,
+    fixed_col_widths: &[u16],
+    blank_first: bool,
+    area_width: u16,
+) -> Row<'static> {
+    let date_str = format!("{}", date.strftime("%Y-%m-%d"));
+    let style = Style::default().fg(Color::DarkGray);
+    let mut cells: Vec<Cell<'static>> = fixed_col_widths
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            if blank_first && i == 0 {
+                Cell::from("")
+            } else {
+                Cell::from(Span::styled("─".repeat(w as usize), style))
+            }
+        })
+        .collect();
+    // Oversized fill — ratatui clips to the actual column width.
+    let fill = "─".repeat(area_width as usize);
+    let content = format!("── {} {}", date_str, fill);
+    cells.push(Cell::from(Span::styled(content, style)));
+    Row::new(cells).style(style)
+}
+
 impl App {
     pub(super) fn render(&mut self, frame: &mut Frame) {
         let arena_ref = self.arena.clone();
@@ -143,60 +201,81 @@ impl App {
             }
         };
 
-        let end_idx = (start_idx + visible_height).min(total);
-
-        // Populate row map for mouse click support (all rows height 1 in raw mode).
-        self.visible_row_map.clear();
-        self.log_list_body_y = area.y + 1; // +1 for header row
-        for view_idx in start_idx..end_idx {
-            self.visible_row_map.push(view_idx);
-        }
+        self.day_transitions = compute_day_transitions(view, arena, self.timezone_mode);
 
         let preview = self.preview_filter();
         let show_source = arena.source_names.len() > 1;
         let src_w = if show_source { source_column_width(arena) } else { 0 };
 
-        let rows: Vec<Row> = (start_idx..end_idx)
-            .map(|view_idx| {
-                let arena_idx = entries[view_idx];
-                let resolved = arena.resolve_entry(arena_idx);
-                let entry = &arena.entries[arena_idx];
+        // Fixed column widths before the Min(1) content column.
+        let fixed_col_widths: Vec<u16> = if show_source {
+            vec![15, src_w]
+        } else {
+            vec![15]
+        };
 
-                let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
+        // Build rows, inserting a separator before each day-transition entry.
+        // Populate row map for mouse click support (all rows height 1 in raw mode).
+        self.visible_row_map.clear();
+        self.log_list_body_y = area.y + 1; // +1 for header row
+        let mut rows: Vec<Row> = Vec::new();
+        let mut line_count = 0usize;
+        let mut table_select_idx: Option<usize> = None;
+        let mut view_idx = start_idx;
 
-                let message = if Some(view_idx) == selected_view_idx {
-                    resolved.message.chars().skip(self.h_scroll).collect()
-                } else {
-                    resolved.message.to_string()
-                };
-
-                let mut cells = vec![Cell::from(timestamp_str)];
-                if show_source {
-                    let name = resolve_source_name(arena, entry.source_id);
-                    cells.push(
-                        Cell::from(Span::styled(name.to_string(), source_style(entry.source_id))),
-                    );
+        while view_idx < total && line_count < visible_height {
+            if self.day_transitions.binary_search(&view_idx).is_ok() {
+                let date = entry_date(arena, entries[view_idx], self.timezone_mode);
+                rows.push(make_day_separator_row(date, &fixed_col_widths, false, area.width));
+                // Clicking a separator selects the entry that follows it.
+                self.visible_row_map.push(view_idx);
+                line_count += 1;
+                if line_count >= visible_height {
+                    break;
                 }
-                cells.push(Cell::from(message));
+            }
 
-                let mut row = Row::new(cells);
+            let arena_idx = entries[view_idx];
+            let resolved = arena.resolve_entry(arena_idx);
+            let entry = &arena.entries[arena_idx];
 
-                let mut style = Style::default();
-                if let Some(ref filter) = self.search {
-                    if entry_matches_filter(arena, arena_idx, filter) {
-                        style = style.fg(Color::Yellow).bold();
-                    }
+            let timestamp_str = format_timestamp(resolved.timestamp, self.timezone_mode);
+            let message = if Some(view_idx) == selected_view_idx {
+                resolved.message.chars().skip(self.h_scroll).collect()
+            } else {
+                resolved.message.to_string()
+            };
+
+            let mut cells = vec![Cell::from(timestamp_str)];
+            if show_source {
+                let name = resolve_source_name(arena, entry.source_id);
+                cells.push(Cell::from(Span::styled(
+                    name.to_string(),
+                    source_style(entry.source_id),
+                )));
+            }
+            cells.push(Cell::from(message));
+
+            let mut style = Style::default();
+            if let Some(ref filter) = self.search {
+                if entry_matches_filter(arena, arena_idx, filter) {
+                    style = style.fg(Color::Yellow).bold();
                 }
-                if let Some(ref pf) = preview {
-                    if entry_matches_filter(arena, arena_idx, pf) {
-                        style = style.bold();
-                    }
+            }
+            if let Some(ref pf) = preview {
+                if entry_matches_filter(arena, arena_idx, pf) {
+                    style = style.bold();
                 }
-                row = row.style(style);
+            }
 
-                row
-            })
-            .collect();
+            if Some(view_idx) == selected_view_idx {
+                table_select_idx = Some(rows.len());
+            }
+            rows.push(Row::new(cells).style(style));
+            self.visible_row_map.push(view_idx);
+            line_count += 1;
+            view_idx += 1;
+        }
 
         let widths: Vec<Constraint> = if show_source {
             vec![Constraint::Length(15), Constraint::Length(src_w), Constraint::Min(1)]
@@ -218,9 +297,7 @@ impl App {
             .row_highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
 
         let mut table_state = TableState::default();
-        if let Some(sel) = selected_view_idx {
-            table_state.select(Some(sel - start_idx));
-        }
+        table_state.select(table_select_idx);
 
         frame.render_stateful_widget(table, area, &mut table_state);
 
@@ -230,6 +307,27 @@ impl App {
             .begin_symbol(None)
             .end_symbol(None);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+
+        // Paint day-transition marks on the scrollbar track.
+        if total > 0 {
+            let buf = frame.buffer_mut();
+            let track_x = area.x + area.width - 1;
+            for &pos in &self.day_transitions {
+                let y = area.y + (pos * area.height as usize / total) as u16;
+                if y < area.y + area.height {
+                    if let Some(cell) = buf.cell_mut((track_x, y)) {
+                        // When the mark overlaps the scrollbar thumb, preserve
+                        // the filled background so both remain visible.
+                        let on_thumb = cell.symbol() == "█";
+                        cell.set_symbol("◆");
+                        cell.set_fg(Color::Yellow);
+                        if on_thumb {
+                            cell.set_bg(Color::Gray);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn render_log_list_pretty(
@@ -428,6 +526,15 @@ impl App {
             }
         };
 
+        self.day_transitions = compute_day_transitions(view, arena, self.timezone_mode);
+
+        // Fixed column widths before the Min(1) content column (pretty mode).
+        let pretty_fixed_widths: Vec<u16> = if show_source {
+            vec![1, 15, src_w, 5]
+        } else {
+            vec![1, 15, 5]
+        };
+
         // Build rows from start_idx, accumulating heights until viewport full.
         let preview = self.preview_filter();
         self.visible_row_map.clear();
@@ -439,6 +546,18 @@ impl App {
         for view_idx in start_idx..total {
             if accumulated >= data_height {
                 break;
+            }
+
+            // Insert a day-separator row before the first entry of a new date.
+            if self.day_transitions.binary_search(&view_idx).is_ok() {
+                let date = entry_date(arena, entries[view_idx], self.timezone_mode);
+                rows.push(make_day_separator_row(date, &pretty_fixed_widths, true, area.width));
+                // Clicking a separator selects the entry that follows it.
+                self.visible_row_map.push(view_idx);
+                accumulated += 1;
+                if accumulated >= data_height {
+                    break;
+                }
             }
 
             let arena_idx = entries[view_idx];
@@ -732,6 +851,27 @@ impl App {
             .begin_symbol(None)
             .end_symbol(None);
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
+
+        // Paint day-transition marks on the scrollbar track.
+        if total > 0 {
+            let buf = frame.buffer_mut();
+            let track_x = area.x + area.width - 1;
+            for &pos in &self.day_transitions {
+                let y = area.y + (pos * area.height as usize / total) as u16;
+                if y < area.y + area.height {
+                    if let Some(cell) = buf.cell_mut((track_x, y)) {
+                        // When the mark overlaps the scrollbar thumb, preserve
+                        // the filled background so both remain visible.
+                        let on_thumb = cell.symbol() == "█";
+                        cell.set_symbol("◆");
+                        cell.set_fg(Color::Yellow);
+                        if on_thumb {
+                            cell.set_bg(Color::Gray);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn render_toolbar(
