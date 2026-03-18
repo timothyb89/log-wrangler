@@ -315,7 +315,14 @@ impl App {
             let buf = frame.buffer_mut();
             let track_x = area.x + area.width - 1;
             for &pos in &self.day_transitions {
-                let y = area.y + (pos * area.height as usize / total) as u16;
+                // Match ratatui's scrollbar thumb formula exactly.
+                // When viewport_content_length is unset, ratatui uses:
+                //   viewport = area.height
+                //   max_vp   = (total - 1) + viewport
+                //   thumb_y  = round(position * track_len / max_vp)
+                let track_len = area.height as f64;
+                let max_vp = (total - 1 + area.height as usize) as f64;
+                let y = area.y + (pos as f64 * track_len / max_vp).round() as u16;
                 if y < area.y + area.height {
                     if let Some(cell) = buf.cell_mut((track_x, y)) {
                         // When the mark overlaps the scrollbar thumb, preserve
@@ -863,7 +870,14 @@ impl App {
             let buf = frame.buffer_mut();
             let track_x = area.x + area.width - 1;
             for &pos in &self.day_transitions {
-                let y = area.y + (pos * area.height as usize / total) as u16;
+                // Match ratatui's scrollbar thumb formula exactly.
+                // When viewport_content_length is unset, ratatui uses:
+                //   viewport = area.height
+                //   max_vp   = (total - 1) + viewport
+                //   thumb_y  = round(position * track_len / max_vp)
+                let track_len = area.height as f64;
+                let max_vp = (total - 1 + area.height as usize) as f64;
+                let y = area.y + (pos as f64 * track_len / max_vp).round() as u16;
                 if y < area.y + area.height {
                     if let Some(cell) = buf.cell_mut((track_x, y)) {
                         // When the mark overlaps the scrollbar thumb, preserve
