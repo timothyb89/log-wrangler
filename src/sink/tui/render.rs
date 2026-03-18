@@ -305,7 +305,9 @@ impl App {
         let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
-            .end_symbol(None);
+            .end_symbol(None)
+            .track_style(Style::default().fg(Color::Gray).bg(Color::Reset))
+            .thumb_style(Style::default().fg(Color::White).bg(Color::Reset));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 
         // Paint day-transition marks on the scrollbar track.
@@ -320,9 +322,11 @@ impl App {
                         // the filled background so both remain visible.
                         let on_thumb = cell.symbol() == "█";
                         cell.set_symbol("◆");
-                        cell.set_fg(Color::Yellow);
                         if on_thumb {
-                            cell.set_bg(Color::Gray);
+                            cell.set_fg(Color::Black);
+                            cell.set_bg(Color::White);
+                        } else {
+                            cell.set_fg(Color::Yellow);
                         }
                     }
                 }
@@ -849,7 +853,9 @@ impl App {
         let mut scrollbar_state = ScrollbarState::new(total).position(start_idx);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
-            .end_symbol(None);
+            .end_symbol(None)
+            .track_style(Style::default().fg(Color::Gray).bg(Color::Reset))
+            .thumb_style(Style::default().fg(Color::White).bg(Color::Reset));
         frame.render_stateful_widget(scrollbar, area, &mut scrollbar_state);
 
         // Paint day-transition marks on the scrollbar track.
@@ -864,9 +870,11 @@ impl App {
                         // the filled background so both remain visible.
                         let on_thumb = cell.symbol() == "█";
                         cell.set_symbol("◆");
-                        cell.set_fg(Color::Yellow);
                         if on_thumb {
-                            cell.set_bg(Color::Gray);
+                            cell.set_fg(Color::Black);
+                            cell.set_bg(Color::White);
+                        } else {
+                            cell.set_fg(Color::Yellow);
                         }
                     }
                 }
