@@ -11,6 +11,7 @@ mod filter;
 mod format;
 mod log;
 mod profile;
+mod query;
 mod sink;
 mod source;
 mod util;

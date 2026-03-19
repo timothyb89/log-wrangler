@@ -266,15 +266,19 @@ impl App {
                 self.filter_input.clear();
                 self.filter_cursor = 0;
                 self.filter_inverted = false;
+                self.completions.clear();
             }
             (KeyCode::Enter, _) => {
+                self.completions.clear();
                 self.apply_filter();
             }
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                 self.filter_entry_mode = match self.filter_entry_mode {
                     FilterEntryMode::Substring => FilterEntryMode::Regex,
-                    FilterEntryMode::Regex => FilterEntryMode::Substring,
+                    FilterEntryMode::Regex => FilterEntryMode::Query,
+                    FilterEntryMode::Query => FilterEntryMode::Substring,
                 };
+                self.query_parse_error = None;
             }
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                 self.filter_inverted = !self.filter_inverted;
@@ -290,11 +294,30 @@ impl App {
                     self.filter_input.remove(self.filter_cursor);
                 }
             }
+            (KeyCode::Up, _) if !self.completions.is_empty() => {
+                let len = self.completions.len();
+                self.completion_cursor = (self.completion_cursor + len - 1) % len;
+                return; // Don't update completions list.
+            }
+            (KeyCode::Down, _) if !self.completions.is_empty() => {
+                self.completion_cursor =
+                    (self.completion_cursor + 1) % self.completions.len();
+                return;
+            }
+            (KeyCode::Left, KeyModifiers::ALT) => {
+                self.cursor_word_left();
+            }
+            (KeyCode::Right, KeyModifiers::ALT) => {
+                self.cursor_word_right();
+            }
             (KeyCode::Left, _) => {
                 self.filter_cursor = self.filter_cursor.saturating_sub(1);
             }
             (KeyCode::Right, _) => {
                 self.filter_cursor = (self.filter_cursor + 1).min(self.filter_input.len());
+            }
+            (KeyCode::Tab, _) => {
+                self.accept_completion();
             }
             (KeyCode::Char(c), _) => {
                 self.filter_input.insert(self.filter_cursor, c);
@@ -302,6 +325,8 @@ impl App {
             }
             _ => {}
         }
+        self.update_query_parse_error();
+        self.update_completions();
     }
 
     fn handle_search_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
@@ -311,15 +336,19 @@ impl App {
                 self.filter_input.clear();
                 self.filter_cursor = 0;
                 self.filter_inverted = false;
+                self.completions.clear();
             }
             (KeyCode::Enter, _) => {
+                self.completions.clear();
                 self.apply_search();
             }
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                 self.filter_entry_mode = match self.filter_entry_mode {
                     FilterEntryMode::Substring => FilterEntryMode::Regex,
-                    FilterEntryMode::Regex => FilterEntryMode::Substring,
+                    FilterEntryMode::Regex => FilterEntryMode::Query,
+                    FilterEntryMode::Query => FilterEntryMode::Substring,
                 };
+                self.query_parse_error = None;
             }
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                 self.filter_inverted = !self.filter_inverted;
@@ -335,11 +364,29 @@ impl App {
                     self.filter_input.remove(self.filter_cursor);
                 }
             }
+            (KeyCode::Up, _) if !self.completions.is_empty() => {
+                self.completion_cursor = self.completion_cursor.saturating_sub(1);
+                return;
+            }
+            (KeyCode::Down, _) if !self.completions.is_empty() => {
+                self.completion_cursor =
+                    (self.completion_cursor + 1).min(self.completions.len().saturating_sub(1));
+                return;
+            }
+            (KeyCode::Left, KeyModifiers::ALT) => {
+                self.cursor_word_left();
+            }
+            (KeyCode::Right, KeyModifiers::ALT) => {
+                self.cursor_word_right();
+            }
             (KeyCode::Left, _) => {
                 self.filter_cursor = self.filter_cursor.saturating_sub(1);
             }
             (KeyCode::Right, _) => {
                 self.filter_cursor = (self.filter_cursor + 1).min(self.filter_input.len());
+            }
+            (KeyCode::Tab, _) => {
+                self.accept_completion();
             }
             (KeyCode::Char(c), _) => {
                 self.filter_input.insert(self.filter_cursor, c);
@@ -347,6 +394,158 @@ impl App {
             }
             _ => {}
         }
+        self.update_query_parse_error();
+        self.update_completions();
+    }
+
+    /// Move cursor to the start of the previous word in filter_input.
+    fn cursor_word_left(&mut self) {
+        if self.filter_cursor == 0 {
+            return;
+        }
+        let bytes = self.filter_input.as_bytes();
+        let mut pos = self.filter_cursor - 1;
+        // Skip whitespace/punctuation going left.
+        while pos > 0 && !bytes[pos].is_ascii_alphanumeric() {
+            pos -= 1;
+        }
+        // Skip word characters going left.
+        while pos > 0 && bytes[pos - 1].is_ascii_alphanumeric() {
+            pos -= 1;
+        }
+        self.filter_cursor = pos;
+    }
+
+    /// Move cursor to the end of the next word in filter_input.
+    fn cursor_word_right(&mut self) {
+        let len = self.filter_input.len();
+        if self.filter_cursor >= len {
+            return;
+        }
+        let bytes = self.filter_input.as_bytes();
+        let mut pos = self.filter_cursor;
+        // Skip current word characters going right.
+        while pos < len && bytes[pos].is_ascii_alphanumeric() {
+            pos += 1;
+        }
+        // Skip whitespace/punctuation going right.
+        while pos < len && !bytes[pos].is_ascii_alphanumeric() {
+            pos += 1;
+        }
+        self.filter_cursor = pos;
+    }
+
+    /// Compute completions for the current cursor position in query mode.
+    fn update_completions(&mut self) {
+        self.completions.clear();
+        self.completion_cursor = 0;
+
+        if self.filter_entry_mode != FilterEntryMode::Query || self.filter_input.is_empty() {
+            return;
+        }
+
+        // Find the word fragment at cursor: scan backward to find the start
+        // of the current token.
+        let before_cursor = &self.filter_input[..self.filter_cursor];
+        let token_start = before_cursor
+            .rfind(|c: char| c == ' ' || c == '(' || c == ')')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let fragment = &self.filter_input[token_start..self.filter_cursor];
+
+        if fragment.is_empty() {
+            return;
+        }
+
+        // Static completions: keywords and field prefixes.
+        let statics = [
+            "message", "level", "source", "timestamp",
+            "label.", "and", "or", "not", "contains", "(?i)",
+        ];
+
+        for kw in &statics {
+            if kw.starts_with(fragment) && *kw != fragment {
+                self.completions.push(kw.to_string());
+            }
+        }
+
+        // Dynamic completions: label keys prefixed with "label.".
+        // Only offer when the fragment starts with "label." or a prefix of it.
+        if fragment.starts_with("label.") {
+            let label_prefix = &fragment["label.".len()..];
+            if let Ok(arena) = self.arena.lock() {
+                let mut seen = std::collections::HashSet::new();
+                for (k, _) in &arena.labels {
+                    let key_str = arena.rodeo.label_keys.resolve(k);
+                    if key_str.starts_with(label_prefix) && seen.insert(key_str.to_string()) {
+                        self.completions.push(format!("label.{}", key_str));
+                    }
+                }
+                // Also check structured field keys.
+                for (k, _) in &arena.structured_fields {
+                    let key_str = arena.rodeo.label_keys.resolve(k);
+                    if key_str.starts_with(label_prefix) && seen.insert(key_str.to_string()) {
+                        self.completions.push(format!("label.{}", key_str));
+                    }
+                }
+            }
+        }
+
+        self.completions.sort();
+        self.completions.dedup();
+
+        // Remove exact match (no point completing to what's already typed).
+        self.completions.retain(|c| c != fragment);
+    }
+
+    /// Accept the currently selected completion, replacing the fragment at cursor.
+    fn accept_completion(&mut self) {
+        if self.completions.is_empty() {
+            return;
+        }
+
+        let idx = self.completion_cursor.min(self.completions.len() - 1);
+        let completion = self.completions[idx].clone();
+
+        // Find the token start (same logic as update_completions).
+        let before_cursor = &self.filter_input[..self.filter_cursor];
+        let token_start = before_cursor
+            .rfind(|c: char| c == ' ' || c == '(' || c == ')')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+
+        // Replace fragment with completion.
+        self.filter_input.replace_range(token_start..self.filter_cursor, &completion);
+        self.filter_cursor = token_start + completion.len();
+
+        // Add trailing space for keywords (not for "label." prefix).
+        if !completion.ends_with('.') {
+            self.filter_input.insert(self.filter_cursor, ' ');
+            self.filter_cursor += 1;
+        }
+
+        self.completions.clear();
+        self.completion_cursor = 0;
+    }
+
+    /// Update cached parse error for query mode and regex mode.
+    fn update_query_parse_error(&mut self) {
+        if self.filter_input.is_empty() {
+            self.query_parse_error = None;
+            return;
+        }
+        self.query_parse_error = match self.filter_entry_mode {
+            FilterEntryMode::Query => crate::query::parse_query(&self.filter_input).err(),
+            FilterEntryMode::Regex => {
+                regex::Regex::new(&self.filter_input).err().map(|e| {
+                    crate::query::ParseError {
+                        offset: 0,
+                        message: format!("invalid regex: {}", e),
+                    }
+                })
+            }
+            FilterEntryMode::Substring => None,
+        };
     }
 
     fn handle_source_dialog_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {

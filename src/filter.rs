@@ -4,6 +4,8 @@ use lasso::Spur;
 use memchr::memmem;
 use regex::Regex;
 
+use crate::query::QueryExpr;
+
 /// How the filter matches against log content.
 #[derive(Clone)]
 pub(crate) enum FilterMode {
@@ -70,4 +72,12 @@ impl Filter {
         let raw = self.raw_matches(text);
         if self.inverted { !raw } else { raw }
     }
+}
+
+/// A matcher that can be either a simple Filter or a compiled query expression.
+#[derive(Clone, Debug)]
+pub(crate) enum Matcher {
+    Simple(Filter),
+    /// A compiled query expression plus the original source text (for display).
+    Query(QueryExpr, String),
 }

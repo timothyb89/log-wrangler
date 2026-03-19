@@ -28,6 +28,7 @@ rustls-native-certs = "0.8"
 url = { version = "2", features = ["serde"] }
 memchr = "2.8.0"
 dirs = "6"
+winnow = "1.0.0"
 
 # The profile that 'dist' will build with
 [profile.dist]

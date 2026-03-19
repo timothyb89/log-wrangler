@@ -12,7 +12,7 @@ use crate::log::{Arena, LogView};
 use crate::util::INTERNAL_SOURCE_ID;
 
 use super::action::COMMAND_REGISTRY;
-use super::filter::entry_matches_filter;
+use super::filter::entry_matches_matcher;
 use super::{App, DisplayMode, FilterEntryMode, ManagedSourceKind, OverlayMode, ScrollState, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
 /// Expand tab characters to spaces so they render visibly in the TUI.
@@ -112,9 +112,16 @@ impl App {
         let view = arena.view_at(&self.view_path);
         self.current_entry_count = view.entries.len();
 
+        let toolbar_height = if self.completions.is_empty() {
+            1
+        } else {
+            // 1 for input line + up to 5 completion rows.
+            1 + self.completions.len().min(5) as u16
+        };
+
         let chunks = Layout::vertical([
-            Constraint::Min(1),    // log list
-            Constraint::Length(1), // toolbar
+            Constraint::Min(1),                    // log list
+            Constraint::Length(toolbar_height),     // toolbar
         ])
         .split(frame.area());
 
@@ -258,12 +265,12 @@ impl App {
 
             let mut style = Style::default();
             if let Some(ref filter) = self.search {
-                if entry_matches_filter(arena, arena_idx, filter) {
+                if entry_matches_matcher(arena, arena_idx, filter) {
                     style = style.fg(Color::Yellow).bold();
                 }
             }
             if let Some(ref pf) = preview {
-                if entry_matches_filter(arena, arena_idx, pf) {
+                if entry_matches_matcher(arena, arena_idx, pf) {
                     style = style.bold();
                 }
             }
@@ -806,12 +813,12 @@ impl App {
 
             let mut style = Style::default();
             if let Some(ref filter) = self.search {
-                if entry_matches_filter(arena, arena_idx, filter) {
+                if entry_matches_matcher(arena, arena_idx, filter) {
                     style = style.fg(Color::Yellow).bold();
                 }
             }
             if let Some(ref pf) = preview {
-                if entry_matches_filter(arena, arena_idx, pf) {
+                if entry_matches_matcher(arena, arena_idx, pf) {
                     style = style.bold();
                 }
             }
@@ -903,6 +910,23 @@ impl App {
         arena: &Arena,
         view: &LogView,
     ) {
+        // If the toolbar is taller than 1 row, the top rows show completions
+        // and the bottom row is the input line.
+        let (completion_area, input_area) = if area.height > 1 && !self.completions.is_empty() {
+            let comp_height = area.height - 1;
+            (
+                Some(ratatui::layout::Rect::new(area.x, area.y, area.width, comp_height)),
+                ratatui::layout::Rect::new(area.x, area.y + comp_height, area.width, 1),
+            )
+        } else {
+            (None, area)
+        };
+
+        if let Some(comp_area) = completion_area {
+            self.render_completions(frame, comp_area);
+        }
+
+        let area = input_area;
         match &self.toolbar_mode {
             ToolbarMode::Normal => {
                 let filter_depth = self.view_path.len();
@@ -934,13 +958,20 @@ impl App {
                 };
 
                 let search_indicator = match &self.search {
-                    Some(filter) => {
-                        let prefix = if filter.inverted { "!" } else { "" };
-                        let pattern = match &filter.mode {
-                            FilterMode::Substring(s, _) => format!("\"{}\"", s),
-                            FilterMode::Regex(r) => format!("/{}/", r.as_str()),
+                    Some(matcher) => {
+                        let pattern = match matcher {
+                            crate::filter::Matcher::Simple(f) => {
+                                let prefix = if f.inverted { "!" } else { "" };
+                                match &f.mode {
+                                    FilterMode::Substring(s, _) => format!("{}\"{}\"", prefix, s),
+                                    FilterMode::Regex(r) => format!("{}/{}/", prefix, r.as_str()),
+                                }
+                            }
+                            crate::filter::Matcher::Query(_, source_text) => {
+                                format!("{{{}}}", source_text)
+                            }
                         };
-                        format!(" | ?:{}{}", prefix, pattern)
+                        format!(" | ?:{}", pattern)
                     }
                     None => String::new(),
                 };
@@ -965,9 +996,11 @@ impl App {
                 let mode_label = match self.filter_entry_mode {
                     FilterEntryMode::Substring => "SUB",
                     FilterEntryMode::Regex => "RGX",
+                    FilterEntryMode::Query => "QRY",
                 };
 
                 let base_style = Style::default().bg(Color::Yellow).fg(Color::Black);
+                let error_style = Style::default().bg(Color::Yellow).fg(Color::Red);
 
                 let mut spans = vec![
                     Span::styled(format!(" [{}]", mode_label), base_style),
@@ -980,8 +1013,26 @@ impl App {
                     ));
                 }
 
-                let filter_text = format!(" Filter: {}", self.filter_input);
-                spans.push(Span::styled(filter_text, base_style));
+                spans.push(Span::styled(" Filter: ", base_style));
+
+                // Split input at error offset for red highlighting from error point onward.
+                if let Some(ref err) = self.query_parse_error {
+                    let offset = err.offset.min(self.filter_input.len());
+                    let (ok_part, err_part) = self.filter_input.split_at(offset);
+                    if !ok_part.is_empty() {
+                        spans.push(Span::styled(ok_part.to_string(), base_style));
+                    }
+                    if !err_part.is_empty() {
+                        spans.push(Span::styled(err_part.to_string(), error_style));
+                    }
+                    // Show error message.
+                    spans.push(Span::styled(
+                        format!("  {}", err.message),
+                        Style::default().bg(Color::Yellow).fg(Color::DarkGray).italic(),
+                    ));
+                } else {
+                    spans.push(Span::styled(self.filter_input.clone(), base_style));
+                }
 
                 // Fill remaining width with background color.
                 let used: usize = spans.iter().map(|s| s.content.len()).sum();
@@ -1006,9 +1057,11 @@ impl App {
                 let mode_label = match self.filter_entry_mode {
                     FilterEntryMode::Substring => "SUB",
                     FilterEntryMode::Regex => "RGX",
+                    FilterEntryMode::Query => "QRY",
                 };
 
                 let base_style = Style::default().bg(Color::Magenta).fg(Color::White);
+                let error_style = Style::default().bg(Color::Magenta).fg(Color::Red);
 
                 let mut spans = vec![
                     Span::styled(format!(" [{}]", mode_label), base_style),
@@ -1021,8 +1074,24 @@ impl App {
                     ));
                 }
 
-                let search_text = format!(" Search: {}", self.filter_input);
-                spans.push(Span::styled(search_text, base_style));
+                spans.push(Span::styled(" Search: ", base_style));
+
+                if let Some(ref err) = self.query_parse_error {
+                    let offset = err.offset.min(self.filter_input.len());
+                    let (ok_part, err_part) = self.filter_input.split_at(offset);
+                    if !ok_part.is_empty() {
+                        spans.push(Span::styled(ok_part.to_string(), base_style));
+                    }
+                    if !err_part.is_empty() {
+                        spans.push(Span::styled(err_part.to_string(), error_style));
+                    }
+                    spans.push(Span::styled(
+                        format!("  {}", err.message),
+                        Style::default().bg(Color::Magenta).fg(Color::DarkGray).italic(),
+                    ));
+                } else {
+                    spans.push(Span::styled(self.filter_input.clone(), base_style));
+                }
 
                 let used: usize = spans.iter().map(|s| s.content.len()).sum();
                 let remaining = (area.width as usize).saturating_sub(used);
@@ -1041,6 +1110,55 @@ impl App {
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
             }
+        }
+    }
+
+    fn render_completions(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let bg = Style::default().bg(Color::DarkGray).fg(Color::White);
+        let selected_style = Style::default().bg(Color::Blue).fg(Color::White);
+        let indicator_style = Style::default().bg(Color::DarkGray).fg(Color::Gray);
+
+        let max_rows = area.height as usize;
+        let total = self.completions.len();
+
+        // Compute the visible window so the cursor is always in view.
+        let scroll_offset = if self.completion_cursor >= max_rows {
+            self.completion_cursor - max_rows + 1
+        } else {
+            0
+        };
+
+        let visible = &self.completions[scroll_offset..total.min(scroll_offset + max_rows)];
+        let indicator = format!("({}/{})", self.completion_cursor + 1, total);
+
+        for (i, completion) in visible.iter().enumerate() {
+            let abs_idx = scroll_offset + i;
+            let style = if abs_idx == self.completion_cursor { selected_style } else { bg };
+            let row_area = ratatui::layout::Rect::new(
+                area.x,
+                area.y + i as u16,
+                area.width,
+                1,
+            );
+
+            let label = format!("  {}", completion);
+            // Right-align the position indicator on the selected row.
+            let width = area.width as usize;
+            let line = if abs_idx == self.completion_cursor {
+                let pad = width.saturating_sub(label.len() + indicator.len());
+                Line::from(vec![
+                    Span::styled(label, style),
+                    Span::styled(" ".repeat(pad), style),
+                    Span::styled(&indicator, indicator_style),
+                ])
+            } else {
+                let pad = width.saturating_sub(label.len());
+                Line::from(vec![
+                    Span::styled(label, style),
+                    Span::styled(" ".repeat(pad), style),
+                ])
+            };
+            frame.render_widget(Paragraph::new(line), row_area);
         }
     }
 

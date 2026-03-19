@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
-use crate::filter::{FilterMode, FilterTarget};
+use crate::filter::{FilterMode, FilterTarget, Matcher};
 use crate::log::{LogView, ViewPath};
 
 use super::{App, ManagedSourceKind, OverlayMode, SourceDialogSourceType, TimezoneMode};
@@ -197,38 +197,41 @@ impl App {
             }
             s.push_str(if has_more[depth - 1] { "├── " } else { "└── " });
             let pat = view
-                .filters
+                .matchers
                 .first()
-                .map(|f| {
-                    // Display source filters as [source-name].
-                    if let FilterTarget::Source(sid) = &f.target {
-                        let name = source_names
-                            .get(*sid as usize)
-                            .map(|s| s.as_str())
-                            .unwrap_or("?");
-                        return format!("[{}]", name);
-                    }
-                    // Display time filters with direction and timestamp.
-                    if let FilterTarget::After(ts) = &f.target {
-                        let tz = match tz_mode {
-                            TimezoneMode::Local => jiff::tz::TimeZone::system(),
-                            TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
-                        };
-                        let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
-                        return format!(">= {}", formatted);
-                    }
-                    if let FilterTarget::Before(ts) = &f.target {
-                        let tz = match tz_mode {
-                            TimezoneMode::Local => jiff::tz::TimeZone::system(),
-                            TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
-                        };
-                        let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
-                        return format!("<= {}", formatted);
-                    }
-                    let prefix = if f.inverted { "!" } else { "" };
-                    match &f.mode {
-                        FilterMode::Substring(p, _) => format!("{}\"{}\"", prefix, p),
-                        FilterMode::Regex(r) => format!("{}/{}/", prefix, r.as_str()),
+                .map(|m| match m {
+                    Matcher::Query(_, source_text) => format!("{{{}}}", source_text),
+                    Matcher::Simple(f) => {
+                        // Display source filters as [source-name].
+                        if let FilterTarget::Source(sid) = &f.target {
+                            let name = source_names
+                                .get(*sid as usize)
+                                .map(|s| s.as_str())
+                                .unwrap_or("?");
+                            return format!("[{}]", name);
+                        }
+                        // Display time filters with direction and timestamp.
+                        if let FilterTarget::After(ts) = &f.target {
+                            let tz = match tz_mode {
+                                TimezoneMode::Local => jiff::tz::TimeZone::system(),
+                                TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
+                            };
+                            let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
+                            return format!(">= {}", formatted);
+                        }
+                        if let FilterTarget::Before(ts) = &f.target {
+                            let tz = match tz_mode {
+                                TimezoneMode::Local => jiff::tz::TimeZone::system(),
+                                TimezoneMode::Utc => jiff::tz::TimeZone::UTC,
+                            };
+                            let formatted = format!("{}", ts.to_zoned(tz).strftime("%H:%M:%S%.3f"));
+                            return format!("<= {}", formatted);
+                        }
+                        let prefix = if f.inverted { "!" } else { "" };
+                        match &f.mode {
+                            FilterMode::Substring(p, _) => format!("{}\"{}\"", prefix, p),
+                            FilterMode::Regex(r) => format!("{}/{}/", prefix, r.as_str()),
+                        }
                     }
                 })
                 .unwrap_or_else(|| "(unfiltered)".to_string());

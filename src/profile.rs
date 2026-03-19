@@ -4,7 +4,7 @@ use color_eyre::eyre::eyre;
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::filter::{Filter, FilterMode, FilterTarget};
+use crate::filter::{Filter, FilterMode, FilterTarget, Matcher};
 use crate::log::{Arena, LogView, MetaRodeo};
 use crate::sink::tui::{ManagedSource, ManagedSourceKind};
 
@@ -73,6 +73,7 @@ pub struct ProfileFilter {
 pub enum ProfileFilterMode {
     Substring(String),
     Regex(String),
+    Query(String),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -146,9 +147,9 @@ fn view_tree_to_profile(
     source_names: &[String],
 ) -> ProfileViewTree {
     let filters = view
-        .filters
+        .matchers
         .iter()
-        .filter_map(|f| filter_to_profile(f, rodeo, source_names))
+        .filter_map(|m| matcher_to_profile(m, rodeo, source_names))
         .collect();
 
     let children = view
@@ -158,6 +159,21 @@ fn view_tree_to_profile(
         .collect();
 
     ProfileViewTree { filters, children }
+}
+
+fn matcher_to_profile(
+    matcher: &Matcher,
+    rodeo: &MetaRodeo,
+    source_names: &[String],
+) -> Option<ProfileFilter> {
+    match matcher {
+        Matcher::Simple(filter) => filter_to_profile(filter, rodeo, source_names),
+        Matcher::Query(_, source_text) => Some(ProfileFilter {
+            mode: ProfileFilterMode::Query(source_text.clone()),
+            target: ProfileFilterTarget::Any,
+            inverted: false,
+        }),
+    }
 }
 
 fn filter_to_profile(
@@ -209,10 +225,10 @@ pub fn profile_to_view_tree(
     rodeo: &MetaRodeo,
     source_names: &[String],
 ) -> LogView {
-    let filters: Vec<Filter> = tree
+    let matchers: Vec<Matcher> = tree
         .filters
         .iter()
-        .filter_map(|pf| profile_filter_to_runtime(pf, rodeo, source_names))
+        .filter_map(|pf| profile_filter_to_matcher(pf, rodeo, source_names))
         .collect();
 
     let children: Vec<LogView> = tree
@@ -222,10 +238,22 @@ pub fn profile_to_view_tree(
         .collect();
 
     LogView {
-        filters,
+        matchers,
         children,
         entries: Vec::new(),
     }
+}
+
+fn profile_filter_to_matcher(
+    pf: &ProfileFilter,
+    rodeo: &MetaRodeo,
+    source_names: &[String],
+) -> Option<Matcher> {
+    if let ProfileFilterMode::Query(ref expr_text) = pf.mode {
+        let query_expr = crate::query::parse_query(expr_text).ok()?;
+        return Some(Matcher::Query(query_expr, expr_text.clone()));
+    }
+    profile_filter_to_runtime(pf, rodeo, source_names).map(Matcher::Simple)
 }
 
 fn profile_filter_to_runtime(
@@ -238,6 +266,10 @@ fn profile_filter_to_runtime(
         ProfileFilterMode::Regex(s) => {
             let re = regex::Regex::new(s).ok()?;
             FilterMode::Regex(re)
+        }
+        ProfileFilterMode::Query(_) => {
+            // Query filters are handled by profile_filter_to_matcher.
+            return None;
         }
     };
 

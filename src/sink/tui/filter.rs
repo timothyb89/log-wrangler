@@ -1,4 +1,4 @@
-use crate::filter::{Filter, FilterMode, FilterTarget};
+use crate::filter::{Filter, FilterMode, FilterTarget, Matcher};
 use crate::log::{Arena, LogView, ViewPath};
 use crate::source::loki::LokiSourceParams;
 use crate::source::teleport::TeleportTlsConfig;
@@ -225,38 +225,47 @@ impl App {
             return;
         }
 
-        let mode = match self.filter_entry_mode {
-            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
-            FilterEntryMode::Regex => match regex::Regex::new(&self.filter_input) {
-                Ok(re) => FilterMode::Regex(re),
-                Err(_) => {
-                    // TODO: show error feedback in toolbar
-                    return;
+        let matcher = match self.filter_entry_mode {
+            FilterEntryMode::Substring => {
+                Matcher::Simple(Filter {
+                    mode: FilterMode::substring(self.filter_input.clone()),
+                    target: FilterTarget::Any,
+                    inverted: self.filter_inverted,
+                })
+            }
+            FilterEntryMode::Regex => {
+                match regex::Regex::new(&self.filter_input) {
+                    Ok(re) => Matcher::Simple(Filter {
+                        mode: FilterMode::Regex(re),
+                        target: FilterTarget::Any,
+                        inverted: self.filter_inverted,
+                    }),
+                    Err(_) => return,
                 }
-            },
-        };
-
-        let filter = Filter {
-            mode,
-            target: FilterTarget::Any,
-            inverted: self.filter_inverted,
+            }
+            FilterEntryMode::Query => {
+                match crate::query::parse_query(&self.filter_input) {
+                    Ok(expr) => Matcher::Query(expr, self.filter_input.clone()),
+                    Err(_) => return,
+                }
+            }
         };
 
         let Ok(mut arena) = self.arena.lock() else {
             return;
         };
 
-        // Build child LogView by testing parent entries against the filter.
+        // Build child LogView by testing parent entries against the matcher.
         let parent = arena.view_at(&self.view_path);
         let mut child_entries = Vec::with_capacity(parent.entries.len());
         for &arena_idx in &parent.entries {
-            if entry_matches_filter(&arena, arena_idx, &filter) {
+            if entry_matches_matcher(&arena, arena_idx, &matcher) {
                 child_entries.push(arena_idx);
             }
         }
 
         let child = LogView {
-            filters: vec![filter],
+            matchers: vec![matcher],
             children: Vec::new(),
             entries: child_entries,
         };
@@ -286,22 +295,33 @@ impl App {
             return;
         }
 
-        let mode = match self.filter_entry_mode {
-            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
-            FilterEntryMode::Regex => match regex::Regex::new(&self.filter_input) {
-                Ok(re) => FilterMode::Regex(re),
-                Err(_) => {
-                    // TODO: show error feedback in toolbar
-                    return;
+        let matcher = match self.filter_entry_mode {
+            FilterEntryMode::Substring => {
+                Matcher::Simple(Filter {
+                    mode: FilterMode::substring(self.filter_input.clone()),
+                    target: FilterTarget::Any,
+                    inverted: self.filter_inverted,
+                })
+            }
+            FilterEntryMode::Regex => {
+                match regex::Regex::new(&self.filter_input) {
+                    Ok(re) => Matcher::Simple(Filter {
+                        mode: FilterMode::Regex(re),
+                        target: FilterTarget::Any,
+                        inverted: self.filter_inverted,
+                    }),
+                    Err(_) => return,
                 }
-            },
+            }
+            FilterEntryMode::Query => {
+                match crate::query::parse_query(&self.filter_input) {
+                    Ok(expr) => Matcher::Query(expr, self.filter_input.clone()),
+                    Err(_) => return,
+                }
+            }
         };
 
-        self.search = Some(Filter {
-            mode,
-            target: FilterTarget::Any,
-            inverted: self.filter_inverted,
-        });
+        self.search = Some(matcher);
 
         self.filter_input.clear();
         self.filter_cursor = 0;
@@ -310,7 +330,7 @@ impl App {
     }
 
     pub(super) fn jump_to_search_match(&mut self, direction: Direction) {
-        let Some(filter) = &self.search else { return };
+        let Some(matcher) = &self.search else { return };
 
         let Ok(arena) = self.arena.lock() else { return };
         let view = arena.view_at(&self.view_path);
@@ -330,7 +350,7 @@ impl App {
                 for offset in 1..=count {
                     let candidate = (current + offset) % total;
                     let arena_idx = view.entries[candidate];
-                    if entry_matches_filter(&arena, arena_idx, filter) {
+                    if entry_matches_matcher(&arena, arena_idx, matcher) {
                         self.scroll = ScrollState::Selected(candidate);
                         self.h_scroll = 0;
                         self.v_scroll = 0;
@@ -342,7 +362,7 @@ impl App {
                 for offset in 1..=count {
                     let candidate = (current + total - offset) % total;
                     let arena_idx = view.entries[candidate];
-                    if entry_matches_filter(&arena, arena_idx, filter) {
+                    if entry_matches_matcher(&arena, arena_idx, matcher) {
                         self.scroll = ScrollState::Selected(candidate);
                         self.h_scroll = 0;
                         self.v_scroll = 0;
@@ -353,24 +373,34 @@ impl App {
         }
     }
 
-    /// Build a temporary filter from the current filter input for live preview
+    /// Build a temporary matcher from the current filter input for live preview
     /// highlighting. Returns `None` when not in filter entry mode, the input is
-    /// empty, or the regex is invalid.
-    pub(super) fn preview_filter(&self) -> Option<Filter> {
+    /// empty, or the pattern is invalid.
+    pub(super) fn preview_filter(&self) -> Option<Matcher> {
         if !matches!(self.toolbar_mode, ToolbarMode::FilterEntry | ToolbarMode::SearchEntry)
             || self.filter_input.is_empty()
         {
             return None;
         }
-        let mode = match self.filter_entry_mode {
-            FilterEntryMode::Substring => FilterMode::substring(self.filter_input.clone()),
-            FilterEntryMode::Regex => FilterMode::Regex(regex::Regex::new(&self.filter_input).ok()?),
-        };
-        Some(Filter {
-            mode,
-            target: FilterTarget::Any,
-            inverted: self.filter_inverted,
-        })
+        match self.filter_entry_mode {
+            FilterEntryMode::Substring => Some(Matcher::Simple(Filter {
+                mode: FilterMode::substring(self.filter_input.clone()),
+                target: FilterTarget::Any,
+                inverted: self.filter_inverted,
+            })),
+            FilterEntryMode::Regex => {
+                let re = regex::Regex::new(&self.filter_input).ok()?;
+                Some(Matcher::Simple(Filter {
+                    mode: FilterMode::Regex(re),
+                    target: FilterTarget::Any,
+                    inverted: self.filter_inverted,
+                }))
+            }
+            FilterEntryMode::Query => {
+                let expr = crate::query::parse_query(&self.filter_input).ok()?;
+                Some(Matcher::Query(expr, self.filter_input.clone()))
+            }
+        }
     }
 
     /// Return the arena index of the currently selected entry, if any.
@@ -420,7 +450,7 @@ impl App {
         }
 
         let child = LogView {
-            filters: vec![filter],
+            matchers: vec![Matcher::Simple(filter)],
             children: Vec::new(),
             entries: child_entries,
         };
@@ -469,13 +499,13 @@ impl App {
         let parent = arena.view_at(&self.view_path);
         let mut child_entries = Vec::with_capacity(parent.entries.len());
         for &arena_idx in &parent.entries {
-            if entry_matches_filter(&arena, arena_idx, &filter) {
+            if entry_matches_matcher(&arena, arena_idx, &Matcher::Simple(filter.clone())) {
                 child_entries.push(arena_idx);
             }
         }
 
         let child = LogView {
-            filters: vec![filter],
+            matchers: vec![Matcher::Simple(filter)],
             children: Vec::new(),
             entries: child_entries,
         };
@@ -676,53 +706,58 @@ impl App {
     }
 }
 
-/// Test whether an arena entry matches a filter (for `FilterTarget::Any`).
+/// Test whether an arena entry matches a matcher.
 /// Used by both filter application and search highlighting.
 ///
 /// Works directly with interned `LogEntry` fields to avoid the per-entry
 /// heap allocations that `resolve_entry()` would introduce.
-pub(super) fn entry_matches_filter(arena: &Arena, arena_idx: usize, filter: &Filter) -> bool {
+pub(super) fn entry_matches_matcher(arena: &Arena, arena_idx: usize, matcher: &Matcher) -> bool {
     let entry = &arena.entries[arena_idx];
-    let rodeo = &arena.rodeo;
 
-    let raw = match &filter.target {
-        crate::filter::FilterTarget::Message => {
-            let msg = rodeo.messages.resolve(&entry.message);
-            filter.raw_matches(msg)
-        }
-        crate::filter::FilterTarget::Any => {
-            let msg = rodeo.messages.resolve(&entry.message);
-            filter.raw_matches(msg)
-                || (0..entry.labels_length).any(|i| {
-                    let (_, v) = &arena.labels[entry.labels_start + i];
-                    filter.raw_matches(rodeo.label_values.resolve(v))
-                })
-                || (0..entry.structured_fields_length).any(|i| {
-                    let (_, v) =
-                        &arena.structured_fields[entry.structured_fields_start + i];
-                    filter.raw_matches(rodeo.label_values.resolve(v))
-                })
-        }
-        crate::filter::FilterTarget::Label(key_spur) => {
-            (0..entry.labels_length).any(|i| {
-                let (k, v) = &arena.labels[entry.labels_start + i];
-                k == key_spur && filter.raw_matches(rodeo.label_values.resolve(v))
-            })
-        }
-        crate::filter::FilterTarget::Source(sid) => {
-            return if filter.inverted {
-                entry.source_id != *sid
-            } else {
-                entry.source_id == *sid
+    match matcher {
+        Matcher::Query(query_expr, _) => query_expr.matches(entry, arena, false),
+        Matcher::Simple(filter) => {
+            let rodeo = &arena.rodeo;
+            let raw = match &filter.target {
+                crate::filter::FilterTarget::Message => {
+                    let msg = rodeo.messages.resolve(&entry.message);
+                    filter.raw_matches(msg)
+                }
+                crate::filter::FilterTarget::Any => {
+                    let msg = rodeo.messages.resolve(&entry.message);
+                    filter.raw_matches(msg)
+                        || (0..entry.labels_length).any(|i| {
+                            let (_, v) = &arena.labels[entry.labels_start + i];
+                            filter.raw_matches(rodeo.label_values.resolve(v))
+                        })
+                        || (0..entry.structured_fields_length).any(|i| {
+                            let (_, v) =
+                                &arena.structured_fields[entry.structured_fields_start + i];
+                            filter.raw_matches(rodeo.label_values.resolve(v))
+                        })
+                }
+                crate::filter::FilterTarget::Label(key_spur) => {
+                    (0..entry.labels_length).any(|i| {
+                        let (k, v) = &arena.labels[entry.labels_start + i];
+                        k == key_spur && filter.raw_matches(rodeo.label_values.resolve(v))
+                    })
+                }
+                crate::filter::FilterTarget::Source(sid) => {
+                    return if filter.inverted {
+                        entry.source_id != *sid
+                    } else {
+                        entry.source_id == *sid
+                    };
+                }
+                crate::filter::FilterTarget::After(ts) => {
+                    return entry.timestamp.timestamp() >= *ts;
+                }
+                crate::filter::FilterTarget::Before(ts) => {
+                    return entry.timestamp.timestamp() <= *ts;
+                }
             };
-        }
-        crate::filter::FilterTarget::After(ts) => {
-            return entry.timestamp.timestamp() >= *ts;
-        }
-        crate::filter::FilterTarget::Before(ts) => {
-            return entry.timestamp.timestamp() <= *ts;
-        }
-    };
 
-    if filter.inverted { !raw } else { raw }
+            if filter.inverted { !raw } else { raw }
+        }
+    }
 }

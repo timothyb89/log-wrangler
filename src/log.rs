@@ -6,7 +6,7 @@ use std::{
 
 use lasso::{Spur, ThreadedRodeo};
 
-use crate::filter::Filter;
+use crate::filter::Matcher;
 use crate::format::{normalize_level, ClassifierChain, ParseOutput};
 use crate::source::SourceMessage;
 
@@ -114,7 +114,7 @@ impl Arena {
                 label_values: Arc::new(ThreadedRodeo::new()),
             },
             root_view: LogView {
-                filters: Vec::new(),
+                matchers: Vec::new(),
                 children: Vec::new(),
                 entries: Vec::new(),
             },
@@ -134,7 +134,7 @@ impl Arena {
             label_values: Arc::new(ThreadedRodeo::new()),
         };
         self.root_view = LogView {
-            filters: Vec::new(),
+            matchers: Vec::new(),
             children: Vec::new(),
             entries: Vec::new(),
         };
@@ -165,9 +165,14 @@ impl Arena {
 
         let len = self.entries.len();
         for idx in 0..len {
-            let a = &mut *self;
-            let entry_ref = &a.entries[idx];
-            a.root_view.ingest(&a.rodeo, &a.labels, entry_ref, idx);
+            let ctx = IngestContext {
+                rodeo: &self.rodeo,
+                labels: &self.labels,
+                structured_fields: &self.structured_fields,
+                source_names: &self.source_names,
+            };
+            let entry_ref = &self.entries[idx];
+            self.root_view.ingest(&ctx, entry_ref, idx);
         }
     }
 
@@ -227,60 +232,79 @@ impl Arena {
 }
 
 pub(crate) struct LogView {
-    pub filters: Vec<Filter>,
+    pub matchers: Vec<Matcher>,
     pub children: Vec<LogView>,
 
     /// A list of indices included in this view, relative to the arena.
     pub entries: Vec<usize>,
 }
 
+/// The arena fields needed by matchers during ingest. Passed separately from
+/// `LogView` to avoid borrow conflicts (LogView lives inside Arena).
+pub(crate) struct IngestContext<'a> {
+    pub rodeo: &'a MetaRodeo,
+    pub labels: &'a [(Spur, Spur)],
+    pub structured_fields: &'a [(Spur, Spur)],
+    pub source_names: &'a [String],
+}
+
 impl LogView {
-    /// Ingest a new entry, applying filters. Takes arena fields separately to
-    /// avoid borrow conflicts when called from the ingest function.
+    /// Ingest a new entry, applying matchers. Takes arena fields via `IngestContext`
+    /// to avoid borrow conflicts when called from the ingest function.
     pub fn ingest(
         &mut self,
-        rodeo: &MetaRodeo,
-        labels: &[(Spur, Spur)],
+        ctx: &IngestContext,
         entry: &LogEntry,
         idx: usize,
     ) {
-        // Apply filters — all must match for the entry to be included.
-        for filter in &self.filters {
-            let matches = match &filter.target {
-                crate::filter::FilterTarget::Message => {
-                    let msg = rodeo.messages.resolve(&entry.message);
-                    filter.matches(msg)
-                }
-                crate::filter::FilterTarget::Any => {
-                    let msg = rodeo.messages.resolve(&entry.message);
-                    let raw = filter.raw_matches(msg)
-                        || (0..entry.labels_length).any(|i| {
-                            let (_, v) = &labels[entry.labels_start + i];
-                            let val = rodeo.label_values.resolve(v);
-                            filter.raw_matches(val)
-                        });
-                    if filter.inverted { !raw } else { raw }
-                }
-                crate::filter::FilterTarget::Label(key_spur) => {
-                    (0..entry.labels_length).any(|i| {
-                        let (k, v) = &labels[entry.labels_start + i];
-                        if k == key_spur {
-                            let val = rodeo.label_values.resolve(v);
-                            filter.matches(val)
-                        } else {
-                            false
+        // Apply matchers — all must match for the entry to be included.
+        for matcher in &self.matchers {
+            let matches = match matcher {
+                Matcher::Simple(filter) => {
+                    match &filter.target {
+                        crate::filter::FilterTarget::Message => {
+                            let msg = ctx.rodeo.messages.resolve(&entry.message);
+                            filter.matches(msg)
                         }
-                    })
+                        crate::filter::FilterTarget::Any => {
+                            let msg = ctx.rodeo.messages.resolve(&entry.message);
+                            let raw = filter.raw_matches(msg)
+                                || (0..entry.labels_length).any(|i| {
+                                    let (_, v) = &ctx.labels[entry.labels_start + i];
+                                    let val = ctx.rodeo.label_values.resolve(v);
+                                    filter.raw_matches(val)
+                                })
+                                || (0..entry.structured_fields_length).any(|i| {
+                                    let (_, v) = &ctx.structured_fields[entry.structured_fields_start + i];
+                                    filter.raw_matches(ctx.rodeo.label_values.resolve(v))
+                                });
+                            if filter.inverted { !raw } else { raw }
+                        }
+                        crate::filter::FilterTarget::Label(key_spur) => {
+                            (0..entry.labels_length).any(|i| {
+                                let (k, v) = &ctx.labels[entry.labels_start + i];
+                                if k == key_spur {
+                                    let val = ctx.rodeo.label_values.resolve(v);
+                                    filter.matches(val)
+                                } else {
+                                    false
+                                }
+                            })
+                        }
+                        crate::filter::FilterTarget::Source(sid) => {
+                            let matches = entry.source_id == *sid;
+                            if filter.inverted { !matches } else { matches }
+                        }
+                        crate::filter::FilterTarget::After(ts) => {
+                            entry.timestamp.timestamp() >= *ts
+                        }
+                        crate::filter::FilterTarget::Before(ts) => {
+                            entry.timestamp.timestamp() <= *ts
+                        }
+                    }
                 }
-                crate::filter::FilterTarget::Source(sid) => {
-                    let matches = entry.source_id == *sid;
-                    if filter.inverted { !matches } else { matches }
-                }
-                crate::filter::FilterTarget::After(ts) => {
-                    entry.timestamp.timestamp() >= *ts
-                }
-                crate::filter::FilterTarget::Before(ts) => {
-                    entry.timestamp.timestamp() <= *ts
+                Matcher::Query(query_expr, _) => {
+                    query_expr.matches_ctx(entry, ctx, false)
                 }
             };
 
@@ -289,11 +313,11 @@ impl LogView {
             }
         }
 
-        // Filters match, append this entry and pass to child views.
+        // Matchers match, append this entry and pass to child views.
         self.entries.push(idx);
 
         for child in &mut self.children {
-            child.ingest(rodeo, labels, entry, idx);
+            child.ingest(ctx, entry, idx);
         }
     }
 }
@@ -385,9 +409,14 @@ fn parse_raw_log(
 fn commit_entry(arena: &mut Arena, entry: LogEntry) {
     let idx = arena.entries.len();
     arena.entries.push(entry);
-    let a = &mut *arena;
-    let entry_ref = &a.entries[idx];
-    a.root_view.ingest(&a.rodeo, &a.labels, entry_ref, idx);
+    let ctx = IngestContext {
+        rodeo: &arena.rodeo,
+        labels: &arena.labels,
+        structured_fields: &arena.structured_fields,
+        source_names: &arena.source_names,
+    };
+    let entry_ref = &arena.entries[idx];
+    arena.root_view.ingest(&ctx, entry_ref, idx);
 }
 
 /// Flush all pending entries whose `received` time exceeds the buffer duration.

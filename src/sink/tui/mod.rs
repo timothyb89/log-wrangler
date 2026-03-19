@@ -17,7 +17,7 @@ use crossterm::terminal::{
 };
 use ratatui::backend::CrosstermBackend;
 
-use crate::filter::Filter;
+use crate::filter::Matcher;
 use crate::log::{Arena, ViewPath};
 use crate::profile::{self, ProfileLoadMode};
 use crate::source::SourceMessage;
@@ -43,6 +43,7 @@ enum Direction {
 enum FilterEntryMode {
     Substring,
     Regex,
+    Query,
 }
 
 /// Display mode for log content.
@@ -269,6 +270,16 @@ pub(crate) struct App {
     /// Whether the filter being entered is inverted (excludes matches).
     filter_inverted: bool,
 
+    /// Cached parse error for query mode, updated on each keystroke.
+    query_parse_error: Option<crate::query::ParseError>,
+
+    /// Completions for the current filter input position. Empty when no
+    /// completions are available or the mode doesn't support them.
+    completions: Vec<String>,
+
+    /// Index of the currently selected completion (if completions are visible).
+    completion_cursor: usize,
+
     /// Whether the app should exit.
     should_quit: bool,
 
@@ -287,9 +298,9 @@ pub(crate) struct App {
     /// Current timezone display mode (local vs UTC).
     timezone_mode: TimezoneMode,
 
-    /// Active search filter. When `Some`, matching entries are highlighted
+    /// Active search matcher. When `Some`, matching entries are highlighted
     /// and n/N navigation is available.
-    search: Option<Filter>,
+    search: Option<Matcher>,
 
     /// Map from screen row offset (relative to log list body top) to view
     /// entry index. Populated each render frame; used by mouse click handler.
@@ -338,6 +349,9 @@ impl App {
             filter_input: String::new(),
             filter_cursor: 0,
             filter_inverted: false,
+            query_parse_error: None,
+            completions: Vec::new(),
+            completion_cursor: 0,
             should_quit: false,
             current_entry_count: 0,
             viewport_height: 0,
