@@ -5,7 +5,7 @@ use crate::log::{Arena, LogView, ViewPath};
 
 use super::filter::entry_matches_matcher;
 
-use super::{App, ManagedSourceKind, OverlayMode, SourceDialogSourceType, TimezoneMode};
+use super::{App, ManagedSourceKind, OverlayMode, SourceDialogSourceType, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn enter_tree_select(&mut self) {
@@ -55,6 +55,58 @@ impl App {
                         arena.view_at(&self.view_path).entries.len();
                 }
                 self.overlay = OverlayMode::None;
+            }
+            KeyCode::Char('e') => {
+                let Ok(arena) = self.arena.lock() else { return };
+                let mut flat: Vec<(ViewPath, String)> = Vec::new();
+                let mut path: ViewPath = Vec::new();
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
+                let Some((selected_path, _)) = flat.get(cursor) else { return };
+                // Can't edit the root view.
+                if selected_path.is_empty() {
+                    return;
+                }
+                let selected_path = selected_path.clone();
+                let view = arena.view_at(&selected_path);
+                let Some(matcher) = view.matchers.first() else { return };
+
+                // Extract filter text, entry mode, and inversion from the matcher.
+                let (text, mode, inverted) = match matcher {
+                    Matcher::Query(expr, source_text) => {
+                        let (text, inv) = match expr {
+                            crate::query::QueryExpr::Not(_) => {
+                                // Strip the "not " prefix we add on inversion.
+                                let t = if source_text.starts_with("not ") || source_text.starts_with("NOT ") {
+                                    source_text[4..].to_string()
+                                } else {
+                                    source_text.clone()
+                                };
+                                (t, true)
+                            }
+                            _ => (source_text.clone(), false),
+                        };
+                        (text, super::FilterEntryMode::Query, inv)
+                    }
+                    Matcher::Simple(f) => {
+                        let (text, mode) = match &f.mode {
+                            FilterMode::Substring(pat, _) => {
+                                (pat.clone(), super::FilterEntryMode::Substring)
+                            }
+                            FilterMode::Regex(re) => {
+                                (re.as_str().to_string(), super::FilterEntryMode::Regex)
+                            }
+                        };
+                        (text, mode, f.inverted)
+                    }
+                };
+                drop(arena);
+
+                self.overlay = OverlayMode::None;
+                self.filter_input = text;
+                self.filter_cursor = self.filter_input.len();
+                self.filter_entry_mode = mode;
+                self.filter_inverted = inverted;
+                self.toolbar_mode = ToolbarMode::FilterEdit(selected_path);
             }
             KeyCode::Char('!') => {
                 let Ok(mut arena) = self.arena.lock() else { return };
@@ -231,7 +283,7 @@ impl App {
 
     /// Rebuild a view's entries (and all descendants) by re-filtering from
     /// the given parent entry list.
-    fn rebuild_subtree(arena: &mut Arena, path: &ViewPath, parent_entries: &[usize]) {
+    pub(super) fn rebuild_subtree(arena: &mut Arena, path: &ViewPath, parent_entries: &[usize]) {
         // Clear this view's entries and recompute from parent.
         {
             let view = arena.view_at_mut(path);

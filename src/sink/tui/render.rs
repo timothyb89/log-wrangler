@@ -992,7 +992,8 @@ impl App {
                     .style(Style::default().bg(Color::Blue).fg(Color::White));
                 frame.render_widget(paragraph, area);
             }
-            ToolbarMode::FilterEntry => {
+            ToolbarMode::FilterEntry | ToolbarMode::FilterEdit(_) => {
+                let is_edit = matches!(self.toolbar_mode, ToolbarMode::FilterEdit(_));
                 let mode_label = match self.filter_entry_mode {
                     FilterEntryMode::Substring => "SUB",
                     FilterEntryMode::Regex => "RGX",
@@ -1013,7 +1014,8 @@ impl App {
                     ));
                 }
 
-                spans.push(Span::styled(" Filter: ", base_style));
+                let label = if is_edit { " Edit: " } else { " Filter: " };
+                spans.push(Span::styled(label, base_style));
 
                 // Split input at error offset for red highlighting from error point onward.
                 if let Some(ref err) = self.query_parse_error {
@@ -1045,10 +1047,10 @@ impl App {
                 frame.render_widget(paragraph, area);
 
                 // Position cursor within the filter input.
-                // prefix spans: " [MODE]" + optional " NOT" + " Filter: "
+                // prefix spans: " [MODE]" + optional " NOT" + " Filter: " / " Edit: "
                 let prefix_len = 2 + mode_label.len() + 1
                     + if self.filter_inverted { 4 } else { 0 }
-                    + 9;
+                    + label.len();
                 let cursor_x =
                     area.x + prefix_len as u16 + self.filter_cursor as u16;
                 frame.set_cursor_position((cursor_x, area.y));
@@ -1198,7 +1200,7 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Views ")
-                    .title_bottom(" ↑↓ / j k : navigate   Enter / Tab : go   ! : invert   Esc : cancel "),
+                    .title_bottom(" ↑↓ navigate  Enter/Tab go  e edit  ! invert  Esc cancel "),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol("> ");

@@ -29,6 +29,8 @@ use crate::source::teleport::TeleportTlsConfig;
 enum ToolbarMode {
     Normal,
     FilterEntry,
+    /// Editing an existing filter at the given view path.
+    FilterEdit(crate::log::ViewPath),
     SearchEntry,
 }
 

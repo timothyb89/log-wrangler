@@ -219,43 +219,44 @@ impl App {
         }
     }
 
-    pub(super) fn apply_filter(&mut self) {
+    /// Build a matcher from the current filter input state. Returns `None` if
+    /// the input is empty or fails to parse.
+    fn build_matcher_from_input(&self) -> Option<Matcher> {
         if self.filter_input.is_empty() {
-            self.toolbar_mode = ToolbarMode::Normal;
-            return;
+            return None;
         }
-
-        let matcher = match self.filter_entry_mode {
+        match self.filter_entry_mode {
             FilterEntryMode::Substring => {
-                Matcher::Simple(Filter {
+                Some(Matcher::Simple(Filter {
                     mode: FilterMode::substring(self.filter_input.clone()),
                     target: FilterTarget::Any,
                     inverted: self.filter_inverted,
-                })
+                }))
             }
             FilterEntryMode::Regex => {
-                match regex::Regex::new(&self.filter_input) {
-                    Ok(re) => Matcher::Simple(Filter {
-                        mode: FilterMode::Regex(re),
-                        target: FilterTarget::Any,
-                        inverted: self.filter_inverted,
-                    }),
-                    Err(_) => return,
-                }
+                let re = regex::Regex::new(&self.filter_input).ok()?;
+                Some(Matcher::Simple(Filter {
+                    mode: FilterMode::Regex(re),
+                    target: FilterTarget::Any,
+                    inverted: self.filter_inverted,
+                }))
             }
             FilterEntryMode::Query => {
-                match crate::query::parse_query(&self.filter_input) {
-                    Ok(expr) => {
-                        let expr = if self.filter_inverted {
-                            crate::query::QueryExpr::Not(Box::new(expr))
-                        } else {
-                            expr
-                        };
-                        Matcher::Query(expr, self.filter_input.clone())
-                    }
-                    Err(_) => return,
-                }
+                let expr = crate::query::parse_query(&self.filter_input).ok()?;
+                let expr = if self.filter_inverted {
+                    crate::query::QueryExpr::Not(Box::new(expr))
+                } else {
+                    expr
+                };
+                Some(Matcher::Query(expr, self.filter_input.clone()))
             }
+        }
+    }
+
+    pub(super) fn apply_filter(&mut self) {
+        let Some(matcher) = self.build_matcher_from_input() else {
+            self.toolbar_mode = ToolbarMode::Normal;
+            return;
         };
 
         let Ok(mut arena) = self.arena.lock() else {
@@ -288,6 +289,39 @@ impl App {
         self.v_scroll = 0;
         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
         self.current_entry_count = arena.view_at(&self.view_path).entries.len();
+
+        self.filter_input.clear();
+        self.filter_cursor = 0;
+        self.filter_inverted = false;
+        self.toolbar_mode = ToolbarMode::Normal;
+    }
+
+    /// Replace the matcher on an existing filter view and rebuild its entries.
+    pub(super) fn apply_filter_edit(&mut self, path: &ViewPath) {
+        let Some(matcher) = self.build_matcher_from_input() else {
+            self.toolbar_mode = ToolbarMode::Normal;
+            return;
+        };
+
+        let Ok(mut arena) = self.arena.lock() else {
+            return;
+        };
+
+        // Replace the view's matchers with the new one.
+        let view = arena.view_at_mut(path);
+        view.matchers = vec![matcher];
+
+        // Rebuild entries from the parent's entry list.
+        let parent_path = &path[..path.len() - 1];
+        let parent_entries: Vec<usize> = arena.view_at(parent_path).entries.clone();
+        Self::rebuild_subtree(&mut arena, path, &parent_entries);
+
+        // Update scroll if we're viewing this path or a descendant.
+        if self.view_path.starts_with(path) {
+            self.current_entry_count = arena.view_at(&self.view_path).entries.len();
+            let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+            self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+        }
 
         self.filter_input.clear();
         self.filter_cursor = 0;
@@ -395,7 +429,7 @@ impl App {
     /// parsing so that partial expressions can still produce live matches as
     /// the user types.
     pub(super) fn preview_filter(&self) -> Option<Matcher> {
-        if !matches!(self.toolbar_mode, ToolbarMode::FilterEntry | ToolbarMode::SearchEntry)
+        if !matches!(self.toolbar_mode, ToolbarMode::FilterEntry | ToolbarMode::FilterEdit(_) | ToolbarMode::SearchEntry)
             || self.filter_input.is_empty()
         {
             return None;

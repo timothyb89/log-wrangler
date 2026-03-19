@@ -41,7 +41,7 @@ impl App {
                 }
                 match self.toolbar_mode {
                     ToolbarMode::Normal => self.handle_normal_key(key.code, key.modifiers),
-                    ToolbarMode::FilterEntry => self.handle_filter_key(key.code, key.modifiers),
+                    ToolbarMode::FilterEntry | ToolbarMode::FilterEdit(_) => self.handle_filter_key(key.code, key.modifiers),
                     ToolbarMode::SearchEntry => self.handle_search_key(key.code, key.modifiers),
                 }
             }
@@ -270,7 +270,12 @@ impl App {
             }
             (KeyCode::Enter, _) => {
                 self.completions.clear();
-                self.apply_filter();
+                if let ToolbarMode::FilterEdit(path) = &self.toolbar_mode {
+                    let path = path.clone();
+                    self.apply_filter_edit(&path);
+                } else {
+                    self.apply_filter();
+                }
             }
             (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
                 self.filter_entry_mode = match self.filter_entry_mode {
