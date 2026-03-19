@@ -166,6 +166,27 @@ impl App {
                 self.filter_cursor = 0;
                 self.filter_inverted = false;
             }
+            Action::EnterFilterSubstring => {
+                self.toolbar_mode = ToolbarMode::FilterEntry;
+                self.filter_entry_mode = FilterEntryMode::Substring;
+                self.filter_input.clear();
+                self.filter_cursor = 0;
+                self.filter_inverted = false;
+            }
+            Action::EnterFilterRegex => {
+                self.toolbar_mode = ToolbarMode::FilterEntry;
+                self.filter_entry_mode = FilterEntryMode::Regex;
+                self.filter_input.clear();
+                self.filter_cursor = 0;
+                self.filter_inverted = false;
+            }
+            Action::EnterFilterQuery => {
+                self.toolbar_mode = ToolbarMode::FilterEntry;
+                self.filter_entry_mode = FilterEntryMode::Query;
+                self.filter_input.clear();
+                self.filter_cursor = 0;
+                self.filter_inverted = false;
+            }
             Action::EnterSearchMode => {
                 self.toolbar_mode = ToolbarMode::SearchEntry;
                 self.filter_input.clear();

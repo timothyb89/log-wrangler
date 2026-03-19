@@ -6,6 +6,9 @@
 pub(super) enum Action {
     Quit,
     EnterFilterMode,
+    EnterFilterSubstring,
+    EnterFilterRegex,
+    EnterFilterQuery,
     EnterSearchMode,
     PopFilter,
     PopAndRemoveFilter,
@@ -43,6 +46,9 @@ pub(super) struct CommandEntry {
 /// `OpenCommandPalette` is deliberately excluded (can't open palette from palette).
 pub(super) const COMMAND_REGISTRY: &[CommandEntry] = &[
     CommandEntry { action: Action::EnterFilterMode,      name: "Filter logs",                hint: "/" },
+    CommandEntry { action: Action::EnterFilterSubstring, name: "Filter (substring)",         hint: "" },
+    CommandEntry { action: Action::EnterFilterRegex,     name: "Filter (regex)",             hint: "" },
+    CommandEntry { action: Action::EnterFilterQuery,     name: "Filter (query)",             hint: "" },
     CommandEntry { action: Action::EnterSearchMode,      name: "Search logs",                hint: "?" },
     CommandEntry { action: Action::PopFilter,            name: "Pop filter (go up)",         hint: "Backspace" },
     CommandEntry { action: Action::PopAndRemoveFilter,   name: "Pop and remove filter",      hint: "p" },
