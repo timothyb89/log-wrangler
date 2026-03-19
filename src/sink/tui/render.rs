@@ -1198,7 +1198,7 @@ impl App {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Views ")
-                    .title_bottom(" ↑↓ / j k : navigate   Enter / Tab : go   Esc : cancel "),
+                    .title_bottom(" ↑↓ / j k : navigate   Enter / Tab : go   ! : invert   Esc : cancel "),
             )
             .highlight_style(Style::default().bg(Color::Blue).fg(Color::White))
             .highlight_symbol("> ");

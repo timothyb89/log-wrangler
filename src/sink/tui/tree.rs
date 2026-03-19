@@ -1,7 +1,9 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::filter::{FilterMode, FilterTarget, Matcher};
-use crate::log::{LogView, ViewPath};
+use crate::log::{Arena, LogView, ViewPath};
+
+use super::filter::entry_matches_matcher;
 
 use super::{App, ManagedSourceKind, OverlayMode, SourceDialogSourceType, TimezoneMode};
 
@@ -53,6 +55,25 @@ impl App {
                         arena.view_at(&self.view_path).entries.len();
                 }
                 self.overlay = OverlayMode::None;
+            }
+            KeyCode::Char('!') => {
+                let Ok(mut arena) = self.arena.lock() else { return };
+                let mut flat: Vec<(ViewPath, String)> = Vec::new();
+                let mut path: ViewPath = Vec::new();
+                Self::flatten_view_tree(&arena.root_view, &mut path, 0, &[], &mut flat, &arena.source_names, self.timezone_mode);
+                let Some((selected_path, _)) = flat.get(cursor) else { return };
+                // Can't invert the root view.
+                if selected_path.is_empty() {
+                    return;
+                }
+                let selected_path = selected_path.clone();
+                Self::toggle_view_inversion(&mut arena, &selected_path);
+                // Update entry count if we're currently viewing this path or a descendant.
+                if self.view_path.starts_with(&selected_path) {
+                    self.current_entry_count = arena.view_at(&self.view_path).entries.len();
+                    let target = Self::selected_arena_idx(&self.scroll, &arena, &self.view_path);
+                    self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+                }
             }
             _ => {}
         }
@@ -174,6 +195,67 @@ impl App {
             }
             // Subcommand and Stdin sources don't support in-place editing.
             _ => {}
+        }
+    }
+
+    /// Toggle inversion on a non-root view's matchers and rebuild its entries.
+    fn toggle_view_inversion(arena: &mut Arena, path: &ViewPath) {
+        // Toggle the inversion flag on each matcher.
+        let view = arena.view_at_mut(path);
+        let matchers = std::mem::take(&mut view.matchers);
+        let matchers = matchers.into_iter().map(|m| match m {
+            Matcher::Simple(mut f) => {
+                f.inverted = !f.inverted;
+                Matcher::Simple(f)
+            }
+            Matcher::Query(expr, text) => {
+                let expr = match expr {
+                    crate::query::QueryExpr::Not(inner) => *inner,
+                    other => crate::query::QueryExpr::Not(Box::new(other)),
+                };
+                let text = if text.starts_with("not ") || text.starts_with("NOT ") {
+                    text[4..].to_string()
+                } else {
+                    format!("not {}", text)
+                };
+                Matcher::Query(expr, text)
+            }
+        }).collect();
+        arena.view_at_mut(path).matchers = matchers;
+
+        // Rebuild entries for this view and its descendants using parent's entries.
+        let parent_path = &path[..path.len() - 1];
+        let parent_entries: Vec<usize> = arena.view_at(parent_path).entries.clone();
+        Self::rebuild_subtree(arena, path, &parent_entries);
+    }
+
+    /// Rebuild a view's entries (and all descendants) by re-filtering from
+    /// the given parent entry list.
+    fn rebuild_subtree(arena: &mut Arena, path: &ViewPath, parent_entries: &[usize]) {
+        // Clear this view's entries and recompute from parent.
+        {
+            let view = arena.view_at_mut(path);
+            view.entries.clear();
+        }
+
+        // Re-filter parent entries through this view's matchers.
+        let view = arena.view_at(path);
+        let matchers: Vec<Matcher> = view.matchers.clone();
+        for &arena_idx in parent_entries {
+            let matches = matchers.iter().all(|m| entry_matches_matcher(arena, arena_idx, m));
+            if matches {
+                let view = arena.view_at_mut(path);
+                view.entries.push(arena_idx);
+            }
+        }
+
+        // Recursively rebuild children.
+        let child_count = arena.view_at(path).children.len();
+        let this_entries: Vec<usize> = arena.view_at(path).entries.clone();
+        for i in 0..child_count {
+            let mut child_path = path.to_vec();
+            child_path.push(i);
+            Self::rebuild_subtree(arena, &child_path, &this_entries);
         }
     }
 
