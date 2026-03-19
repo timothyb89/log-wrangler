@@ -390,6 +390,10 @@ impl App {
     /// Build a temporary matcher from the current filter input for live preview
     /// highlighting. Returns `None` when not in filter entry mode, the input is
     /// empty, or the pattern is invalid.
+    ///
+    /// For query and regex modes, unclosed delimiters are auto-closed before
+    /// parsing so that partial expressions can still produce live matches as
+    /// the user types.
     pub(super) fn preview_filter(&self) -> Option<Matcher> {
         if !matches!(self.toolbar_mode, ToolbarMode::FilterEntry | ToolbarMode::SearchEntry)
             || self.filter_input.is_empty()
@@ -411,7 +415,8 @@ impl App {
                 }))
             }
             FilterEntryMode::Query => {
-                let expr = crate::query::parse_query(&self.filter_input).ok()?;
+                let patched = auto_close_delimiters(&self.filter_input);
+                let expr = crate::query::parse_query(&patched).ok()?;
                 let expr = if self.filter_inverted {
                     crate::query::QueryExpr::Not(Box::new(expr))
                 } else {
@@ -722,6 +727,106 @@ impl App {
         self.h_scroll = 0;
         self.v_scroll = 0;
         self.scroll = Self::reselect_scroll(&arena, &self.view_path, target);
+    }
+}
+
+/// Auto-close unclosed delimiters in a query string so that partial
+/// expressions can parse for live preview. Only used by `preview_filter`.
+fn auto_close_delimiters(input: &str) -> String {
+    let mut result = String::from(input);
+
+    // Track open delimiters, respecting escapes.
+    let mut in_quote = false;
+    let mut in_regex = false;
+    let mut open_parens: i32 = 0;
+    let mut prev_backslash = false;
+
+    for ch in input.chars() {
+        if prev_backslash {
+            prev_backslash = false;
+            continue;
+        }
+        if ch == '\\' {
+            prev_backslash = true;
+            continue;
+        }
+        if in_quote {
+            if ch == '"' {
+                in_quote = false;
+            }
+            continue;
+        }
+        if in_regex {
+            if ch == '/' {
+                in_regex = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_quote = true,
+            '/' => in_regex = true,
+            '(' => open_parens += 1,
+            ')' => open_parens -= 1,
+            _ => {}
+        }
+    }
+
+    if in_quote {
+        result.push('"');
+    }
+    if in_regex {
+        result.push('/');
+    }
+    for _ in 0..open_parens {
+        result.push(')');
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::auto_close_delimiters;
+
+    #[test]
+    fn close_unclosed_quote() {
+        assert_eq!(auto_close_delimiters(r#"level == "error"#), r#"level == "error""#);
+    }
+
+    #[test]
+    fn close_unclosed_regex() {
+        assert_eq!(auto_close_delimiters("message =~ /foo"), "message =~ /foo/");
+    }
+
+    #[test]
+    fn close_unclosed_paren() {
+        assert_eq!(
+            auto_close_delimiters(r#"(level == "error""#),
+            r#"(level == "error")"#
+        );
+    }
+
+    #[test]
+    fn close_multiple() {
+        assert_eq!(
+            auto_close_delimiters(r#"((level == "error" and message contains "foo"#),
+            r#"((level == "error" and message contains "foo"))"#
+        );
+    }
+
+    #[test]
+    fn already_closed() {
+        let input = r#"level == "error""#;
+        assert_eq!(auto_close_delimiters(input), input);
+    }
+
+    #[test]
+    fn escaped_quote_not_counted() {
+        // The \" inside the string shouldn't count as closing.
+        assert_eq!(
+            auto_close_delimiters(r#"message contains "hello \"world"#),
+            r#"message contains "hello \"world""#
+        );
     }
 }
 
