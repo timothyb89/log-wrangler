@@ -456,5 +456,8 @@ pub(crate) async fn run_tui(
     )?;
     terminal.show_cursor()?;
 
-    Ok(())
+    // Exit immediately. Background threads (stdin reader, crossterm event
+    // reader, ingest) may still be blocked on I/O and would otherwise prevent
+    // the process from terminating promptly after the TUI is torn down.
+    std::process::exit(0);
 }
