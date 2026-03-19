@@ -148,6 +148,12 @@ impl App {
             OverlayMode::ProfileLoadDialog(_) => {
                 self.render_profile_load_dialog(frame, frame.area());
             }
+            OverlayMode::ExportModeSelect { .. } => {
+                self.render_export_mode_select(frame, frame.area());
+            }
+            OverlayMode::ExportFileDialog(_) => {
+                self.render_export_file_dialog(frame, frame.area());
+            }
             OverlayMode::None => {}
         }
     }
@@ -988,9 +994,16 @@ impl App {
                     search_indicator, hints,
                 );
 
-                let paragraph = Paragraph::new(Line::from(status))
-                    .style(Style::default().bg(Color::Blue).fg(Color::White));
-                frame.render_widget(paragraph, area);
+                if let Some(ref err) = self.export_error {
+                    let error_msg = format!(" Export error: {}", err);
+                    let paragraph = Paragraph::new(Line::from(error_msg))
+                        .style(Style::default().bg(Color::Red).fg(Color::White));
+                    frame.render_widget(paragraph, area);
+                } else {
+                    let paragraph = Paragraph::new(Line::from(status))
+                        .style(Style::default().bg(Color::Blue).fg(Color::White));
+                    frame.render_widget(paragraph, area);
+                }
             }
             ToolbarMode::FilterEntry | ToolbarMode::FilterEdit(_) => {
                 let is_edit = matches!(self.toolbar_mode, ToolbarMode::FilterEdit(_));
@@ -1599,6 +1612,92 @@ impl App {
         let mut list_state = ListState::default();
         list_state.select(Some(selected));
         frame.render_stateful_widget(list, chunks[1], &mut list_state);
+    }
+
+    fn render_export_mode_select(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let cursor = match &self.overlay {
+            OverlayMode::ExportModeSelect { cursor } => *cursor,
+            _ => return,
+        };
+
+        let modes = super::export::ExportMode::ALL;
+        let popup_area = centered_rect_fixed(40, (modes.len() as u16) + 2, area);
+        frame.render_widget(Clear, popup_area);
+
+        let items: Vec<ListItem> = modes
+            .iter()
+            .map(|mode| {
+                let marker = if *mode == self.export_mode { " * " } else { "   " };
+                let label = format!("{}{}", marker, mode);
+                ListItem::new(label)
+            })
+            .collect();
+
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Export Mode ")
+                    .title_bottom(" Enter : select   Esc : cancel "),
+            )
+            .highlight_style(Style::default().bg(Color::Blue).fg(Color::White));
+
+        let mut list_state = ListState::default();
+        list_state.select(Some(cursor.min(modes.len().saturating_sub(1))));
+        frame.render_stateful_widget(list, popup_area, &mut list_state);
+    }
+
+    fn render_export_file_dialog(&self, frame: &mut Frame, area: ratatui::layout::Rect) {
+        let state = match &self.overlay {
+            OverlayMode::ExportFileDialog(s) => s,
+            _ => return,
+        };
+
+        let height = if state.error.is_some() { 7 } else { 5 };
+        let popup_area = centered_rect_fixed(60, height, area);
+        frame.render_widget(Clear, popup_area);
+
+        let mode_label = format!(" Export to File ({}) ", self.export_mode);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(mode_label)
+            .title_bottom(" Enter : export   Esc : cancel ");
+        let inner = block.inner(popup_area);
+        frame.render_widget(block, popup_area);
+
+        let label_style = Style::default().fg(Color::Gray);
+        let field_style = Style::default().fg(Color::White);
+        let error_style = Style::default().fg(Color::Red);
+
+        let label_y = inner.y + 1;
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled("    Path: ", label_style))),
+            ratatui::layout::Rect::new(inner.x, label_y, 10, 1),
+        );
+
+        let field_x = inner.x + 10;
+        let field_width = inner.width.saturating_sub(12) as usize;
+        let scroll_offset = if state.cursor > field_width.saturating_sub(2) {
+            state.cursor - field_width.saturating_sub(2)
+        } else {
+            0
+        };
+        let visible: String = state.input.chars().skip(scroll_offset).take(field_width).collect();
+        let field_text = format!("{:<width$}", visible, width = field_width);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(field_text, field_style))),
+            ratatui::layout::Rect::new(field_x, label_y, field_width as u16, 1),
+        );
+
+        let cursor_x = field_x + (state.cursor - scroll_offset) as u16;
+        frame.set_cursor_position((cursor_x, label_y));
+
+        if let Some(err) = &state.error {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(err.as_str(), error_style))),
+                ratatui::layout::Rect::new(inner.x + 2, label_y + 2, inner.width.saturating_sub(4), 1),
+            );
+        }
     }
 }
 

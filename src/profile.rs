@@ -50,6 +50,8 @@ pub struct ProfileOptions {
     pub follow: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub format_regex: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_mode: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -93,7 +95,7 @@ pub enum ProfileFilterTarget {
 
 impl Profile {
     /// Build a profile from the current app state.
-    pub fn from_app_state(sources: &[ManagedSource], arena: &Arena) -> Self {
+    pub fn from_app_state(sources: &[ManagedSource], arena: &Arena, export_mode: Option<&str>) -> Self {
         let profile_sources: Vec<ProfileSource> = sources
             .iter()
             .map(|s| {
@@ -130,6 +132,7 @@ impl Profile {
             since_secs: None,
             follow: None,
             format_regex: None,
+            export_mode: export_mode.map(|s| s.to_string()),
         };
 
         Profile {

@@ -1,4 +1,5 @@
 mod action;
+mod export;
 mod filter;
 mod input;
 mod render;
@@ -84,6 +85,15 @@ enum OverlayMode {
     CommandPalette(CommandPaletteState),
     ProfileSaveDialog(ProfileSaveState),
     ProfileLoadDialog(ProfileLoadState),
+    ExportModeSelect { cursor: usize },
+    ExportFileDialog(ExportFileState),
+}
+
+/// State for the export-to-file dialog.
+struct ExportFileState {
+    input: String,
+    cursor: usize,
+    error: Option<String>,
 }
 
 /// State for the command palette overlay.
@@ -322,6 +332,12 @@ pub(crate) struct App {
     /// first entry).
     day_transitions: Vec<usize>,
 
+    /// Current export format mode.
+    export_mode: export::ExportMode,
+
+    /// Transient error message from a clipboard export, cleared on next keypress.
+    export_error: Option<String>,
+
     /// Managed sources (stoppable/editable). Empty when no managed sources exist.
     sources: Vec<ManagedSource>,
 
@@ -365,6 +381,8 @@ impl App {
             log_list_body_y: 0,
             pretty_viewport_start: None,
             day_transitions: Vec::new(),
+            export_mode: export::ExportMode::Pretty,
+            export_error: None,
             sources,
             ingest_tx,
             next_source_id,

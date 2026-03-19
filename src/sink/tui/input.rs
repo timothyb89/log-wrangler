@@ -3,7 +3,7 @@ use crossterm::event::{
 };
 
 use super::action::{Action, COMMAND_REGISTRY};
-use super::{App, CommandPaletteState, Direction, DisplayMode, FilterEntryMode, OverlayMode, ProfileLoadState, ProfileSaveState, ScrollState, SourceDialogMode, SourceDialogSourceType, SourceDialogState, TimezoneMode, ToolbarMode};
+use super::{App, CommandPaletteState, Direction, DisplayMode, ExportFileState, FilterEntryMode, OverlayMode, ProfileLoadState, ProfileSaveState, ScrollState, SourceDialogMode, SourceDialogSourceType, SourceDialogState, TimezoneMode, ToolbarMode};
 
 impl App {
     pub(super) fn handle_event(&mut self, event: Event) {
@@ -35,6 +35,14 @@ impl App {
                     }
                     OverlayMode::ProfileLoadDialog(_) => {
                         self.handle_profile_load_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::ExportModeSelect { .. } => {
+                        self.handle_export_mode_select_key(key.code, key.modifiers);
+                        return;
+                    }
+                    OverlayMode::ExportFileDialog(_) => {
+                        self.handle_export_file_dialog_key(key.code, key.modifiers);
                         return;
                     }
                     OverlayMode::None => {}
@@ -112,6 +120,7 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
+        self.export_error = None;
         match (code, modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.dispatch_action(Action::Quit),
             (KeyCode::Char('p'), KeyModifiers::CONTROL) => self.dispatch_action(Action::OpenCommandPalette),
@@ -276,6 +285,23 @@ impl App {
                 self.overlay = OverlayMode::ProfileLoadDialog(
                     ProfileLoadState::new(crate::profile::ProfileLoadMode::Filters),
                 );
+            }
+            Action::ExportToClipboard => {
+                self.export_to_clipboard();
+            }
+            Action::ExportToFile => {
+                self.overlay = OverlayMode::ExportFileDialog(ExportFileState {
+                    input: String::new(),
+                    cursor: 0,
+                    error: None,
+                });
+            }
+            Action::SelectExportMode => {
+                let cursor = super::export::ExportMode::ALL
+                    .iter()
+                    .position(|m| *m == self.export_mode)
+                    .unwrap_or(0);
+                self.overlay = OverlayMode::ExportModeSelect { cursor };
             }
         }
     }
@@ -1154,6 +1180,120 @@ impl App {
             self.scroll = ScrollState::Selected(target);
             self.h_scroll = 0;
             self.v_scroll = 0;
+        }
+    }
+
+    fn handle_export_mode_select_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+        let modes = super::export::ExportMode::ALL;
+        let count = modes.len();
+
+        match code {
+            KeyCode::Esc => {
+                self.overlay = OverlayMode::None;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let OverlayMode::ExportModeSelect { ref mut cursor } = self.overlay {
+                    *cursor = cursor.saturating_sub(1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let OverlayMode::ExportModeSelect { ref mut cursor } = self.overlay {
+                    *cursor = (*cursor + 1).min(count - 1);
+                }
+            }
+            KeyCode::Enter => {
+                let cursor = match &self.overlay {
+                    OverlayMode::ExportModeSelect { cursor } => *cursor,
+                    _ => return,
+                };
+                if let Some(&mode) = modes.get(cursor) {
+                    self.export_mode = mode;
+                }
+                self.overlay = OverlayMode::None;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_export_file_dialog_key(&mut self, code: KeyCode, _modifiers: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.overlay = OverlayMode::None;
+            }
+            KeyCode::Enter => {
+                let input = match &self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s.input.trim().to_string(),
+                    _ => return,
+                };
+                if input.is_empty() {
+                    let state = match &mut self.overlay {
+                        OverlayMode::ExportFileDialog(s) => s,
+                        _ => return,
+                    };
+                    state.error = Some("Path is required".to_string());
+                    return;
+                }
+                self.export_to_file(&input);
+            }
+            KeyCode::Backspace => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                if state.cursor > 0 {
+                    state.cursor -= 1;
+                    state.input.remove(state.cursor);
+                    state.error = None;
+                }
+            }
+            KeyCode::Delete => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                if state.cursor < state.input.len() {
+                    state.input.remove(state.cursor);
+                    state.error = None;
+                }
+            }
+            KeyCode::Left => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = (state.cursor + 1).min(state.input.len());
+            }
+            KeyCode::Home => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = 0;
+            }
+            KeyCode::End => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                state.cursor = state.input.len();
+            }
+            KeyCode::Char(c) => {
+                let state = match &mut self.overlay {
+                    OverlayMode::ExportFileDialog(s) => s,
+                    _ => return,
+                };
+                state.input.insert(state.cursor, c);
+                state.cursor += 1;
+                state.error = None;
+            }
+            _ => {}
         }
     }
 }

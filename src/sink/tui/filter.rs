@@ -645,7 +645,8 @@ impl App {
             Err(_) => return,
         };
 
-        let profile = crate::profile::Profile::from_app_state(&self.sources, &arena);
+        let export_mode_label = self.export_mode.label();
+        let profile = crate::profile::Profile::from_app_state(&self.sources, &arena, Some(export_mode_label));
         drop(arena);
 
         if let Err(e) = crate::profile::save_profile(&profile, &path) {
@@ -669,12 +670,14 @@ impl App {
             crate::profile::ProfileLoadMode::All => {
                 self.apply_profile_sources(&profile);
                 self.apply_profile_filters(&profile);
+                self.apply_profile_options(&profile);
             }
             crate::profile::ProfileLoadMode::Sources => {
                 self.apply_profile_sources(&profile);
             }
             crate::profile::ProfileLoadMode::Filters => {
                 self.apply_profile_filters(&profile);
+                self.apply_profile_options(&profile);
             }
         }
     }
@@ -708,6 +711,16 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+    }
+
+    fn apply_profile_options(&mut self, profile: &crate::profile::Profile) {
+        if let Some(options) = &profile.options {
+            if let Some(ref mode_str) = options.export_mode {
+                if let Some(mode) = super::export::ExportMode::from_label(mode_str) {
+                    self.export_mode = mode;
+                }
             }
         }
     }

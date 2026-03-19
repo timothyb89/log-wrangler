@@ -32,6 +32,9 @@ pub(super) enum Action {
     LoadProfile,
     LoadProfileSourcesOnly,
     LoadProfileFiltersOnly,
+    ExportToClipboard,
+    ExportToFile,
+    SelectExportMode,
 }
 
 /// A command entry in the palette registry.
@@ -71,5 +74,8 @@ pub(super) const COMMAND_REGISTRY: &[CommandEntry] = &[
     CommandEntry { action: Action::LoadProfile,          name: "Load profile",                hint: "" },
     CommandEntry { action: Action::LoadProfileSourcesOnly, name: "Load profile (sources only)", hint: "" },
     CommandEntry { action: Action::LoadProfileFiltersOnly, name: "Load profile (filters only)", hint: "" },
+    CommandEntry { action: Action::ExportToClipboard,     name: "Export to clipboard",          hint: "" },
+    CommandEntry { action: Action::ExportToFile,          name: "Export to file",               hint: "" },
+    CommandEntry { action: Action::SelectExportMode,      name: "Set export mode",              hint: "" },
     CommandEntry { action: Action::Quit,                 name: "Quit",                        hint: "q" },
 ];
