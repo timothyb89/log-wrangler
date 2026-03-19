@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, process::Stdio};
 use std::sync::mpsc;
 
 use tokio::io::AsyncBufReadExt;
@@ -20,6 +20,7 @@ pub fn run_subcommand_source(
             .args(["-c", &command])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
+            .stdin(Stdio::null())
             .kill_on_drop(true)
             .spawn();
 
