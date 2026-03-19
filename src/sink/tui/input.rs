@@ -283,6 +283,9 @@ impl App {
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                 self.filter_inverted = !self.filter_inverted;
             }
+            (KeyCode::Backspace, KeyModifiers::ALT) => {
+                self.delete_word_left();
+            }
             (KeyCode::Backspace, _) => {
                 if self.filter_cursor > 0 {
                     self.filter_cursor -= 1;
@@ -353,6 +356,9 @@ impl App {
             (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                 self.filter_inverted = !self.filter_inverted;
             }
+            (KeyCode::Backspace, KeyModifiers::ALT) => {
+                self.delete_word_left();
+            }
             (KeyCode::Backspace, _) => {
                 if self.filter_cursor > 0 {
                     self.filter_cursor -= 1;
@@ -414,6 +420,13 @@ impl App {
             pos -= 1;
         }
         self.filter_cursor = pos;
+    }
+
+    /// Delete from cursor to the start of the previous word.
+    fn delete_word_left(&mut self) {
+        let old = self.filter_cursor;
+        self.cursor_word_left();
+        self.filter_input.drain(self.filter_cursor..old);
     }
 
     /// Move cursor to the end of the next word in filter_input.
