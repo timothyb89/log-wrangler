@@ -245,7 +245,14 @@ impl App {
             }
             FilterEntryMode::Query => {
                 match crate::query::parse_query(&self.filter_input) {
-                    Ok(expr) => Matcher::Query(expr, self.filter_input.clone()),
+                    Ok(expr) => {
+                        let expr = if self.filter_inverted {
+                            crate::query::QueryExpr::Not(Box::new(expr))
+                        } else {
+                            expr
+                        };
+                        Matcher::Query(expr, self.filter_input.clone())
+                    }
                     Err(_) => return,
                 }
             }
@@ -315,7 +322,14 @@ impl App {
             }
             FilterEntryMode::Query => {
                 match crate::query::parse_query(&self.filter_input) {
-                    Ok(expr) => Matcher::Query(expr, self.filter_input.clone()),
+                    Ok(expr) => {
+                        let expr = if self.filter_inverted {
+                            crate::query::QueryExpr::Not(Box::new(expr))
+                        } else {
+                            expr
+                        };
+                        Matcher::Query(expr, self.filter_input.clone())
+                    }
                     Err(_) => return,
                 }
             }
@@ -398,6 +412,11 @@ impl App {
             }
             FilterEntryMode::Query => {
                 let expr = crate::query::parse_query(&self.filter_input).ok()?;
+                let expr = if self.filter_inverted {
+                    crate::query::QueryExpr::Not(Box::new(expr))
+                } else {
+                    expr
+                };
                 Some(Matcher::Query(expr, self.filter_input.clone()))
             }
         }
